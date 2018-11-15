@@ -443,8 +443,8 @@ func TestOnActivityCompleted(t *testing.T) {
 		switch e {
 		case swf.EventTypeActivityTaskCompleted:
 			event := &swf.HistoryEvent{
-				EventType: s.S(e),
-				EventId:   s.L(129),
+				EventType:                            s.S(e),
+				EventId:                              s.L(129),
 				ActivityTaskCompletedEventAttributes: &swf.ActivityTaskCompletedEventAttributes{ScheduledEventId: s.L(123)},
 			}
 			data := &TestingType{Field: "yes"}
@@ -483,8 +483,8 @@ func TestOnActivityFailedTimedOutCanceled(t *testing.T) {
 		switch e {
 		case swf.EventTypeActivityTaskFailed, swf.EventTypeActivityTaskTimedOut, swf.EventTypeActivityTaskCanceled:
 			event := &swf.HistoryEvent{
-				EventType: s.S(e),
-				EventId:   s.L(129),
+				EventType:                           s.S(e),
+				EventId:                             s.L(129),
 				ActivityTaskCanceledEventAttributes: &swf.ActivityTaskCanceledEventAttributes{ScheduledEventId: s.L(123)},
 				ActivityTaskFailedEventAttributes:   &swf.ActivityTaskFailedEventAttributes{ScheduledEventId: s.L(123)},
 				ActivityTaskTimedOutEventAttributes: &swf.ActivityTaskTimedOutEventAttributes{ScheduledEventId: s.L(123)},
@@ -553,7 +553,7 @@ func testContextWithActivity(scheduledEventId int, event *swf.ActivityTaskSchedu
 		correlator.Serializer = JSONStateSerializer{}
 		correlator.Track(s.EventFromPayload(scheduledEventId, event))
 		ctx := deciderTestContext()
-		ctx.EventCorrelator = correlator
+		ctx.eventCorrelator = correlator
 		return ctx
 	}
 }

@@ -191,8 +191,8 @@ func typeCheck(typedFunc interface{}, in []string, out []string) {
 }
 
 func ToMulti(f DecisionFunc) MultiDecisionFunc {
-	return func(ctx *FSMContext, h swf.HistoryEvent, data interface{}) []swf.Decision {
-		return []swf.Decision{f(ctx, h, data)}
+	return func(ctx *FSMContext, h *swf.HistoryEvent, data interface{}) []*swf.Decision {
+		return []*swf.Decision{f(ctx, h, data)}
 	}
 }
 
