@@ -539,10 +539,13 @@ func TestEntryDecisions(t *testing.T) {
 	fsm := testFSM()
 
 	event := &swf.HistoryEvent{
-		EventId:   I(1),
 		EventType: S("WorkflowExecutionStarted"),
 		WorkflowExecutionStartedEventAttributes: &swf.WorkflowExecutionStartedEventAttributes{
-			Input: S(fsm.Serialize(new(TestData))),
+			Input: S(fsm.Serialize(SerializedState{
+				StateVersion: 1,
+				StateName:    "InitialState",
+				StateData:    fsm.Serialize(new(TestData)),
+			})),
 		},
 	}
 
@@ -578,23 +581,8 @@ func TestEntryDecisions(t *testing.T) {
 
 	fsm.Init()
 
-	_, decisions, state, _ := fsm.Tick(
-		&swf.PollForDecisionTaskOutput{
-			Events:                 []*swf.HistoryEvent{event},
-			PreviousStartedEventId: L(0),
-			StartedEventId:         L(1),
-
-			TaskToken: S("token"),
-			WorkflowExecution: &swf.WorkflowExecution{
-				WorkflowId: S("fii"),
-				RunId:      S("run"),
-			},
-			WorkflowType: &swf.WorkflowType{
-				Name:    S("foo"),
-				Version: S("1"),
-			},
-		},
-	)
+	resp := testDecisionTask(1, []*swf.HistoryEvent{event})
+	_, decisions, state, _ := fsm.Tick(resp)
 
 	if len(decisions) != 3 {
 		//2 state markers + 1 EntryDecision
