@@ -2,26 +2,31 @@ package migrator
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"testing"
 	"time"
 
-	"github.com/awslabs/aws-sdk-go/aws"
-	"github.com/awslabs/aws-sdk-go/gen/kinesis"
-	"github.com/awslabs/aws-sdk-go/gen/swf"
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/credentials"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/kinesis"
+	"github.com/aws/aws-sdk-go/service/swf"
+	. "github.com/sclasen/swfsm/log"
 )
 
 var testDomain = fmt.Sprintf("test-domain-%d", time.Now().UnixNano())
 
 func TestMigrateDomains(t *testing.T) {
 	if os.Getenv("AWS_ACCESS_KEY_ID") == "" || os.Getenv("AWS_SECRET_ACCESS_KEY") == "" {
-		log.Printf("WARNING: NO AWS CREDS SPECIFIED, SKIPPING MIGRATIONS TEST")
+		Log.Printf("WARNING: NO AWS CREDS SPECIFIED, SKIPPING MIGRATIONS TEST")
 		return
 	}
 
-	creds, _ := aws.EnvCreds()
-	client := swf.New(creds, "us-east-1", nil)
+	config := &aws.Config{
+		Credentials: credentials.NewEnvCredentials(),
+		Region:      aws.String("us-east-1"),
+	}
+	client := swf.New(session.New(config))
 
 	domain := fmt.Sprintf("test-domain-%d", time.Now().UnixNano()) //dont use the testDomain since we deprecate this one
 
@@ -55,12 +60,15 @@ func TestMigrateDomains(t *testing.T) {
 
 func TestMigrateWorkflowTypes(t *testing.T) {
 	if os.Getenv("AWS_ACCESS_KEY_ID") == "" || os.Getenv("AWS_SECRET_ACCESS_KEY") == "" {
-		log.Printf("WARNING: NO AWS CREDS SPECIFIED, SKIPPING MIGRATIONS TEST")
+		Log.Printf("WARNING: NO AWS CREDS SPECIFIED, SKIPPING MIGRATIONS TEST")
 		return
 	}
 	createDomain()
-	creds, _ := aws.EnvCreds()
-	client := swf.New(creds, "us-east-1", nil)
+	config := &aws.Config{
+		Credentials: credentials.NewEnvCredentials(),
+		Region:      aws.String("us-east-1"),
+	}
+	client := swf.New(session.New(config))
 
 	workflow := fmt.Sprintf("test-workflow-%d", time.Now().UnixNano())
 	version := fmt.Sprintf("test-workflow-version-%d", time.Now().UnixNano())
@@ -101,13 +109,15 @@ func TestMigrateWorkflowTypes(t *testing.T) {
 func TestMigrateActivityTypes(t *testing.T) {
 
 	if os.Getenv("AWS_ACCESS_KEY_ID") == "" || os.Getenv("AWS_SECRET_ACCESS_KEY") == "" {
-		log.Printf("WARNING: NO AWS CREDS SPECIFIED, SKIPPING MIGRATIONS TEST")
+		Log.Printf("WARNING: NO AWS CREDS SPECIFIED, SKIPPING MIGRATIONS TEST")
 		return
 	}
 	createDomain()
-	creds, _ := aws.EnvCreds()
-	client := swf.New(creds, "us-east-1", nil)
-
+	config := &aws.Config{
+		Credentials: credentials.NewEnvCredentials(),
+		Region:      aws.String("us-east-1"),
+	}
+	client := swf.New(session.New(config))
 	activity := fmt.Sprintf("test-activity-%d", time.Now().UnixNano())
 	version := fmt.Sprintf("test-activity-version-%d", time.Now().UnixNano())
 
@@ -146,21 +156,25 @@ func TestMigrateActivityTypes(t *testing.T) {
 
 func TestMigrateStreams(t *testing.T) {
 	if os.Getenv("AWS_ACCESS_KEY_ID") == "" || os.Getenv("AWS_SECRET_ACCESS_KEY") == "" {
-		log.Printf("WARNING: NO AWS CREDS SPECIFIED, SKIPPING MIGRATIONS TEST")
+		Log.Printf("WARNING: NO AWS CREDS SPECIFIED, SKIPPING MIGRATIONS TEST")
 		return
 	}
 
-	creds, _ := aws.EnvCreds()
-	client := kinesis.New(creds, "us-east-1", nil)
+	config := &aws.Config{
+		Credentials: credentials.NewEnvCredentials(),
+		Region:      aws.String("us-east-1"),
+	}
+	client := kinesis.New(session.New(config))
 
 	sm := StreamMigrator{
 		Streams: []kinesis.CreateStreamInput{
 			kinesis.CreateStreamInput{
 				StreamName: aws.String(testDomain),
-				ShardCount: aws.Integer(1),
+				ShardCount: aws.Int64(1),
 			},
 		},
-		Client: client,
+		Client:  client,
+		Timeout: 30,
 	}
 
 	sm.Migrate()
@@ -169,8 +183,11 @@ func TestMigrateStreams(t *testing.T) {
 }
 
 func createDomain() {
-	creds, _ := aws.EnvCreds()
-	client := swf.New(creds, "us-east-1", nil)
+	config := &aws.Config{
+		Credentials: credentials.NewEnvCredentials(),
+		Region:      aws.String("us-east-1"),
+	}
+	client := swf.New(session.New(config))
 	req := swf.RegisterDomainInput{
 		Name:                                   aws.String(testDomain),
 		Description:                            aws.String("test domain"),

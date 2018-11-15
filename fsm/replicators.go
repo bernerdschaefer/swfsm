@@ -1,16 +1,16 @@
 package fsm
 
 import (
-	"log"
-
-	"github.com/awslabs/aws-sdk-go/aws"
-	"github.com/awslabs/aws-sdk-go/gen/kinesis"
-	"github.com/awslabs/aws-sdk-go/gen/swf"
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/service/kinesis"
+	"github.com/aws/aws-sdk-go/service/swf"
 	"github.com/juju/errors"
+	. "github.com/sclasen/swfsm/log"
 )
 
 //ReplicationHandler can be configured on an FSM and will be called when a DecisionTask is successfully completed.
-type ReplicationHandler func(*FSMContext, *swf.DecisionTask, *swf.RespondDecisionTaskCompletedInput, *SerializedState) error
+//Note that events can be delivered out of order to the ReplicationHandler.
+type ReplicationHandler func(*FSMContext, *swf.PollForDecisionTaskOutput, *swf.RespondDecisionTaskCompletedInput, *SerializedState) error
 
 //KinesisOps is the subset of kinesis.Kinesis ops required by KinesisReplication
 type KinesisOps interface {
@@ -18,13 +18,13 @@ type KinesisOps interface {
 }
 
 func defaultKinesisReplicator() KinesisReplicator {
-	return func(fsm, workflowID string, put func() (*kinesis.PutRecordOutput, error)) (*kinesis.PutRecordOutput, error) {
+	return func(fsm, workflowId string, put func() (*kinesis.PutRecordOutput, error)) (*kinesis.PutRecordOutput, error) {
 		return put()
 	}
 }
 
 //KinesisReplicator lets you customize the retry logic around Replicating State to Kinesis.
-type KinesisReplicator func(fsm, workflowID string, put func() (*kinesis.PutRecordOutput, error)) (*kinesis.PutRecordOutput, error)
+type KinesisReplicator func(fsm, workflowId string, put func() (*kinesis.PutRecordOutput, error)) (*kinesis.PutRecordOutput, error)
 
 //KinesisReplication can be used as a ReplicationHandler by setting its Handler func as the FSM ReplicationHandler
 type KinesisReplication struct {
@@ -34,13 +34,13 @@ type KinesisReplication struct {
 }
 
 //Handler is a ReplicationHandler. to configure it on your FSM, do fsm.ReplicationHandler = &KinesisReplication{...).Handler
-func (f *KinesisReplication) Handler(ctx *FSMContext, decisionTask *swf.DecisionTask, completedDecision *swf.RespondDecisionTaskCompletedInput, state *SerializedState) error {
+func (f *KinesisReplication) Handler(ctx *FSMContext, decisionTask *swf.PollForDecisionTaskOutput, completedDecision *swf.RespondDecisionTaskCompletedInput, state *SerializedState) error {
 	if state == nil || f.KinesisStream == "" {
 		return nil
 	}
 	stateToReplicate, err := ctx.Serializer().Serialize(state)
 	if err != nil {
-		log.Printf("component=kinesis-replication at=serialize-state-failed error=%q", err.Error())
+		Log.Printf("component=kinesis-replication at=serialize-state-failed error=%q", err.Error())
 		return errors.Trace(err)
 	}
 
@@ -48,17 +48,17 @@ func (f *KinesisReplication) Handler(ctx *FSMContext, decisionTask *swf.Decision
 		return f.KinesisOps.PutRecord(&kinesis.PutRecordInput{
 			StreamName: aws.String(f.KinesisStream),
 			//partition by workflow
-			PartitionKey: decisionTask.WorkflowExecution.WorkflowID,
+			PartitionKey: decisionTask.WorkflowExecution.WorkflowId,
 			Data:         []byte(stateToReplicate),
 		})
 	}
 
-	resp, err := f.KinesisReplicator(*ctx.WorkflowType.Name, *decisionTask.WorkflowExecution.WorkflowID, put)
+	resp, err := f.KinesisReplicator(*ctx.WorkflowType.Name, *decisionTask.WorkflowExecution.WorkflowId, put)
 
 	if err != nil {
-		log.Printf("component=kinesis-replication  at=replicate-state-failed error=%q", err.Error())
+		Log.Printf("component=kinesis-replication  at=replicate-state-failed error=%q", err.Error())
 	} else {
-		log.Printf("component=kinesis-replication at=replicated-state shard=%s sequence=%s", *resp.ShardID, *resp.SequenceNumber)
+		Log.Printf("component=kinesis-replication at=replicated-state shard=%s sequence=%s", *resp.ShardId, *resp.SequenceNumber)
 	}
 	return errors.Trace(err)
 }

@@ -6,79 +6,83 @@ import (
 
 	"strconv"
 
-	"github.com/awslabs/aws-sdk-go/aws"
-	"github.com/awslabs/aws-sdk-go/gen/swf"
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/service/swf"
 )
 
 //error code constants
 const (
-	ErrorTypeUnknownResourceFault                 = "com.amazonaws.swf.base.model#UnknownResourceFault"
-	ErrorTypeWorkflowExecutionAlreadyStartedFault = "com.amazonaws.swf.base.model#WorkflowExecutionAlreadyStartedFault"
-	ErrorTypeDomainAlreadyExistsFault             = "com.amazonaws.swf.base.model#DomainAlreadyExistsFault"
-	ErrorTypeAlreadyExistsFault                   = "com.amazonaws.swf.base.model#TypeAlreadyExistsFault"
+	ErrorTypeUnknownResourceFault                 = "UnknownResourceFault"
+	ErrorTypeWorkflowExecutionAlreadyStartedFault = "WorkflowExecutionAlreadyStartedFault"
+	ErrorTypeDomainAlreadyExistsFault             = "DomainAlreadyExistsFault"
+	ErrorTypeAlreadyExistsFault                   = "TypeAlreadyExistsFault"
 	ErrorTypeStreamNotFound                       = "ResourceNotFoundException"
 	ErrorTypeStreamAlreadyExists                  = "ResourceInUseException"
 )
 
-var eventTypes = map[string]func(swf.HistoryEvent) interface{}{
-	swf.EventTypeWorkflowExecutionStarted:                 func(h swf.HistoryEvent) interface{} { return h.WorkflowExecutionStartedEventAttributes },
-	swf.EventTypeWorkflowExecutionCancelRequested:         func(h swf.HistoryEvent) interface{} { return h.WorkflowExecutionCancelRequestedEventAttributes },
-	swf.EventTypeWorkflowExecutionCompleted:               func(h swf.HistoryEvent) interface{} { return h.WorkflowExecutionCompletedEventAttributes },
-	swf.EventTypeCompleteWorkflowExecutionFailed:          func(h swf.HistoryEvent) interface{} { return h.CompleteWorkflowExecutionFailedEventAttributes },
-	swf.EventTypeWorkflowExecutionFailed:                  func(h swf.HistoryEvent) interface{} { return h.WorkflowExecutionFailedEventAttributes },
-	swf.EventTypeFailWorkflowExecutionFailed:              func(h swf.HistoryEvent) interface{} { return h.FailWorkflowExecutionFailedEventAttributes },
-	swf.EventTypeWorkflowExecutionTimedOut:                func(h swf.HistoryEvent) interface{} { return h.WorkflowExecutionTimedOutEventAttributes },
-	swf.EventTypeWorkflowExecutionCanceled:                func(h swf.HistoryEvent) interface{} { return h.WorkflowExecutionCanceledEventAttributes },
-	swf.EventTypeCancelWorkflowExecutionFailed:            func(h swf.HistoryEvent) interface{} { return h.CancelWorkflowExecutionFailedEventAttributes },
-	swf.EventTypeWorkflowExecutionContinuedAsNew:          func(h swf.HistoryEvent) interface{} { return h.WorkflowExecutionContinuedAsNewEventAttributes },
-	swf.EventTypeContinueAsNewWorkflowExecutionFailed:     func(h swf.HistoryEvent) interface{} { return h.ContinueAsNewWorkflowExecutionFailedEventAttributes },
-	swf.EventTypeWorkflowExecutionTerminated:              func(h swf.HistoryEvent) interface{} { return h.WorkflowExecutionTerminatedEventAttributes },
-	swf.EventTypeDecisionTaskScheduled:                    func(h swf.HistoryEvent) interface{} { return h.DecisionTaskScheduledEventAttributes },
-	swf.EventTypeDecisionTaskStarted:                      func(h swf.HistoryEvent) interface{} { return h.DecisionTaskStartedEventAttributes },
-	swf.EventTypeDecisionTaskCompleted:                    func(h swf.HistoryEvent) interface{} { return h.DecisionTaskCompletedEventAttributes },
-	swf.EventTypeDecisionTaskTimedOut:                     func(h swf.HistoryEvent) interface{} { return h.DecisionTaskTimedOutEventAttributes },
-	swf.EventTypeActivityTaskScheduled:                    func(h swf.HistoryEvent) interface{} { return h.ActivityTaskScheduledEventAttributes },
-	swf.EventTypeScheduleActivityTaskFailed:               func(h swf.HistoryEvent) interface{} { return h.ScheduleActivityTaskFailedEventAttributes },
-	swf.EventTypeActivityTaskStarted:                      func(h swf.HistoryEvent) interface{} { return h.ActivityTaskStartedEventAttributes },
-	swf.EventTypeActivityTaskCompleted:                    func(h swf.HistoryEvent) interface{} { return h.ActivityTaskCompletedEventAttributes },
-	swf.EventTypeActivityTaskFailed:                       func(h swf.HistoryEvent) interface{} { return h.ActivityTaskFailedEventAttributes },
-	swf.EventTypeActivityTaskTimedOut:                     func(h swf.HistoryEvent) interface{} { return h.ActivityTaskTimedOutEventAttributes },
-	swf.EventTypeActivityTaskCanceled:                     func(h swf.HistoryEvent) interface{} { return h.ActivityTaskCanceledEventAttributes },
-	swf.EventTypeActivityTaskCancelRequested:              func(h swf.HistoryEvent) interface{} { return h.ActivityTaskCancelRequestedEventAttributes },
-	swf.EventTypeRequestCancelActivityTaskFailed:          func(h swf.HistoryEvent) interface{} { return h.RequestCancelActivityTaskFailedEventAttributes },
-	swf.EventTypeWorkflowExecutionSignaled:                func(h swf.HistoryEvent) interface{} { return h.WorkflowExecutionSignaledEventAttributes },
-	swf.EventTypeMarkerRecorded:                           func(h swf.HistoryEvent) interface{} { return h.MarkerRecordedEventAttributes },
-	swf.EventTypeRecordMarkerFailed:                       func(h swf.HistoryEvent) interface{} { return h.RecordMarkerFailedEventAttributes },
-	swf.EventTypeTimerStarted:                             func(h swf.HistoryEvent) interface{} { return h.TimerStartedEventAttributes },
-	swf.EventTypeStartTimerFailed:                         func(h swf.HistoryEvent) interface{} { return h.StartTimerFailedEventAttributes },
-	swf.EventTypeTimerFired:                               func(h swf.HistoryEvent) interface{} { return h.TimerFiredEventAttributes },
-	swf.EventTypeTimerCanceled:                            func(h swf.HistoryEvent) interface{} { return h.TimerCanceledEventAttributes },
-	swf.EventTypeCancelTimerFailed:                        func(h swf.HistoryEvent) interface{} { return h.CancelTimerFailedEventAttributes },
-	swf.EventTypeStartChildWorkflowExecutionInitiated:     func(h swf.HistoryEvent) interface{} { return h.StartChildWorkflowExecutionInitiatedEventAttributes },
-	swf.EventTypeStartChildWorkflowExecutionFailed:        func(h swf.HistoryEvent) interface{} { return h.StartChildWorkflowExecutionFailedEventAttributes },
-	swf.EventTypeChildWorkflowExecutionStarted:            func(h swf.HistoryEvent) interface{} { return h.ChildWorkflowExecutionStartedEventAttributes },
-	swf.EventTypeChildWorkflowExecutionCompleted:          func(h swf.HistoryEvent) interface{} { return h.ChildWorkflowExecutionCompletedEventAttributes },
-	swf.EventTypeChildWorkflowExecutionFailed:             func(h swf.HistoryEvent) interface{} { return h.ChildWorkflowExecutionFailedEventAttributes },
-	swf.EventTypeChildWorkflowExecutionTimedOut:           func(h swf.HistoryEvent) interface{} { return h.ChildWorkflowExecutionTimedOutEventAttributes },
-	swf.EventTypeChildWorkflowExecutionCanceled:           func(h swf.HistoryEvent) interface{} { return h.ChildWorkflowExecutionCanceledEventAttributes },
-	swf.EventTypeChildWorkflowExecutionTerminated:         func(h swf.HistoryEvent) interface{} { return h.ChildWorkflowExecutionTerminatedEventAttributes },
-	swf.EventTypeSignalExternalWorkflowExecutionInitiated: func(h swf.HistoryEvent) interface{} { return h.SignalExternalWorkflowExecutionInitiatedEventAttributes },
-	swf.EventTypeSignalExternalWorkflowExecutionFailed:    func(h swf.HistoryEvent) interface{} { return h.SignalExternalWorkflowExecutionFailedEventAttributes },
-	swf.EventTypeExternalWorkflowExecutionSignaled:        func(h swf.HistoryEvent) interface{} { return h.ExternalWorkflowExecutionSignaledEventAttributes },
-	swf.EventTypeRequestCancelExternalWorkflowExecutionInitiated: func(h swf.HistoryEvent) interface{} {
+var eventTypes = map[string]func(*swf.HistoryEvent) interface{}{
+	swf.EventTypeWorkflowExecutionStarted:             func(h *swf.HistoryEvent) interface{} { return h.WorkflowExecutionStartedEventAttributes },
+	swf.EventTypeWorkflowExecutionCancelRequested:     func(h *swf.HistoryEvent) interface{} { return h.WorkflowExecutionCancelRequestedEventAttributes },
+	swf.EventTypeWorkflowExecutionCompleted:           func(h *swf.HistoryEvent) interface{} { return h.WorkflowExecutionCompletedEventAttributes },
+	swf.EventTypeCompleteWorkflowExecutionFailed:      func(h *swf.HistoryEvent) interface{} { return h.CompleteWorkflowExecutionFailedEventAttributes },
+	swf.EventTypeWorkflowExecutionFailed:              func(h *swf.HistoryEvent) interface{} { return h.WorkflowExecutionFailedEventAttributes },
+	swf.EventTypeFailWorkflowExecutionFailed:          func(h *swf.HistoryEvent) interface{} { return h.FailWorkflowExecutionFailedEventAttributes },
+	swf.EventTypeWorkflowExecutionTimedOut:            func(h *swf.HistoryEvent) interface{} { return h.WorkflowExecutionTimedOutEventAttributes },
+	swf.EventTypeWorkflowExecutionCanceled:            func(h *swf.HistoryEvent) interface{} { return h.WorkflowExecutionCanceledEventAttributes },
+	swf.EventTypeCancelWorkflowExecutionFailed:        func(h *swf.HistoryEvent) interface{} { return h.CancelWorkflowExecutionFailedEventAttributes },
+	swf.EventTypeWorkflowExecutionContinuedAsNew:      func(h *swf.HistoryEvent) interface{} { return h.WorkflowExecutionContinuedAsNewEventAttributes },
+	swf.EventTypeContinueAsNewWorkflowExecutionFailed: func(h *swf.HistoryEvent) interface{} { return h.ContinueAsNewWorkflowExecutionFailedEventAttributes },
+	swf.EventTypeWorkflowExecutionTerminated:          func(h *swf.HistoryEvent) interface{} { return h.WorkflowExecutionTerminatedEventAttributes },
+	swf.EventTypeDecisionTaskScheduled:                func(h *swf.HistoryEvent) interface{} { return h.DecisionTaskScheduledEventAttributes },
+	swf.EventTypeDecisionTaskStarted:                  func(h *swf.HistoryEvent) interface{} { return h.DecisionTaskStartedEventAttributes },
+	swf.EventTypeDecisionTaskCompleted:                func(h *swf.HistoryEvent) interface{} { return h.DecisionTaskCompletedEventAttributes },
+	swf.EventTypeDecisionTaskTimedOut:                 func(h *swf.HistoryEvent) interface{} { return h.DecisionTaskTimedOutEventAttributes },
+	swf.EventTypeActivityTaskScheduled:                func(h *swf.HistoryEvent) interface{} { return h.ActivityTaskScheduledEventAttributes },
+	swf.EventTypeScheduleActivityTaskFailed:           func(h *swf.HistoryEvent) interface{} { return h.ScheduleActivityTaskFailedEventAttributes },
+	swf.EventTypeActivityTaskStarted:                  func(h *swf.HistoryEvent) interface{} { return h.ActivityTaskStartedEventAttributes },
+	swf.EventTypeActivityTaskCompleted:                func(h *swf.HistoryEvent) interface{} { return h.ActivityTaskCompletedEventAttributes },
+	swf.EventTypeActivityTaskFailed:                   func(h *swf.HistoryEvent) interface{} { return h.ActivityTaskFailedEventAttributes },
+	swf.EventTypeActivityTaskTimedOut:                 func(h *swf.HistoryEvent) interface{} { return h.ActivityTaskTimedOutEventAttributes },
+	swf.EventTypeActivityTaskCanceled:                 func(h *swf.HistoryEvent) interface{} { return h.ActivityTaskCanceledEventAttributes },
+	swf.EventTypeActivityTaskCancelRequested:          func(h *swf.HistoryEvent) interface{} { return h.ActivityTaskCancelRequestedEventAttributes },
+	swf.EventTypeRequestCancelActivityTaskFailed:      func(h *swf.HistoryEvent) interface{} { return h.RequestCancelActivityTaskFailedEventAttributes },
+	swf.EventTypeWorkflowExecutionSignaled:            func(h *swf.HistoryEvent) interface{} { return h.WorkflowExecutionSignaledEventAttributes },
+	swf.EventTypeMarkerRecorded:                       func(h *swf.HistoryEvent) interface{} { return h.MarkerRecordedEventAttributes },
+	swf.EventTypeRecordMarkerFailed:                   func(h *swf.HistoryEvent) interface{} { return h.RecordMarkerFailedEventAttributes },
+	swf.EventTypeTimerStarted:                         func(h *swf.HistoryEvent) interface{} { return h.TimerStartedEventAttributes },
+	swf.EventTypeStartTimerFailed:                     func(h *swf.HistoryEvent) interface{} { return h.StartTimerFailedEventAttributes },
+	swf.EventTypeTimerFired:                           func(h *swf.HistoryEvent) interface{} { return h.TimerFiredEventAttributes },
+	swf.EventTypeTimerCanceled:                        func(h *swf.HistoryEvent) interface{} { return h.TimerCanceledEventAttributes },
+	swf.EventTypeCancelTimerFailed:                    func(h *swf.HistoryEvent) interface{} { return h.CancelTimerFailedEventAttributes },
+	swf.EventTypeStartChildWorkflowExecutionInitiated: func(h *swf.HistoryEvent) interface{} { return h.StartChildWorkflowExecutionInitiatedEventAttributes },
+	swf.EventTypeStartChildWorkflowExecutionFailed:    func(h *swf.HistoryEvent) interface{} { return h.StartChildWorkflowExecutionFailedEventAttributes },
+	swf.EventTypeChildWorkflowExecutionStarted:        func(h *swf.HistoryEvent) interface{} { return h.ChildWorkflowExecutionStartedEventAttributes },
+	swf.EventTypeChildWorkflowExecutionCompleted:      func(h *swf.HistoryEvent) interface{} { return h.ChildWorkflowExecutionCompletedEventAttributes },
+	swf.EventTypeChildWorkflowExecutionFailed:         func(h *swf.HistoryEvent) interface{} { return h.ChildWorkflowExecutionFailedEventAttributes },
+	swf.EventTypeChildWorkflowExecutionTimedOut:       func(h *swf.HistoryEvent) interface{} { return h.ChildWorkflowExecutionTimedOutEventAttributes },
+	swf.EventTypeChildWorkflowExecutionCanceled:       func(h *swf.HistoryEvent) interface{} { return h.ChildWorkflowExecutionCanceledEventAttributes },
+	swf.EventTypeChildWorkflowExecutionTerminated:     func(h *swf.HistoryEvent) interface{} { return h.ChildWorkflowExecutionTerminatedEventAttributes },
+	swf.EventTypeSignalExternalWorkflowExecutionInitiated: func(h *swf.HistoryEvent) interface{} {
+		return h.SignalExternalWorkflowExecutionInitiatedEventAttributes
+	},
+	swf.EventTypeSignalExternalWorkflowExecutionFailed: func(h *swf.HistoryEvent) interface{} { return h.SignalExternalWorkflowExecutionFailedEventAttributes },
+	swf.EventTypeExternalWorkflowExecutionSignaled:     func(h *swf.HistoryEvent) interface{} { return h.ExternalWorkflowExecutionSignaledEventAttributes },
+	swf.EventTypeRequestCancelExternalWorkflowExecutionInitiated: func(h *swf.HistoryEvent) interface{} {
 		return h.RequestCancelExternalWorkflowExecutionInitiatedEventAttributes
 	},
-	swf.EventTypeRequestCancelExternalWorkflowExecutionFailed: func(h swf.HistoryEvent) interface{} {
+	swf.EventTypeRequestCancelExternalWorkflowExecutionFailed: func(h *swf.HistoryEvent) interface{} {
 		return h.RequestCancelExternalWorkflowExecutionFailedEventAttributes
 	},
-	swf.EventTypeExternalWorkflowExecutionCancelRequested: func(h swf.HistoryEvent) interface{} { return h.ExternalWorkflowExecutionCancelRequestedEventAttributes },
+	swf.EventTypeExternalWorkflowExecutionCancelRequested: func(h *swf.HistoryEvent) interface{} {
+		return h.ExternalWorkflowExecutionCancelRequestedEventAttributes
+	},
 }
 
 //EventFromPayload will construct swf.HistoryEvent with the correct id, event type and Attributes struct set, based on the type of the data passed to it,
 //which should be one of the swf.*EventAttributes structs.
-func EventFromPayload(eventID int, data interface{}) swf.HistoryEvent {
+func EventFromPayload(eventId int, data interface{}) *swf.HistoryEvent {
 	event := &swf.HistoryEvent{}
-	event.EventID = I(eventID)
+	event.EventId = I(eventId)
 	switch t := data.(type) {
 	case *swf.ActivityTaskCancelRequestedEventAttributes:
 		event.ActivityTaskCancelRequestedEventAttributes = t
@@ -222,15 +226,15 @@ func EventFromPayload(eventID int, data interface{}) swf.HistoryEvent {
 		event.WorkflowExecutionTimedOutEventAttributes = t
 		event.EventType = S(swf.EventTypeWorkflowExecutionTimedOut)
 	}
-	return *event
+	return event
 }
 
 //PrettyHistoryEvent pretty prints a swf.HistoryEvent in a readable form for logging.
-func PrettyHistoryEvent(h swf.HistoryEvent) string {
+func PrettyHistoryEvent(h *swf.HistoryEvent) string {
 	var buffer bytes.Buffer
 	buffer.WriteString("HistoryEvent{ ")
-	if h.EventID != nil {
-		buffer.WriteString(fmt.Sprintf("EventId: %d,", *h.EventID))
+	if h.EventId != nil {
+		buffer.WriteString(fmt.Sprintf("EventId: %d,", *h.EventId))
 	}
 	if h.EventTimestamp != nil {
 		buffer.WriteString(fmt.Sprintf("EventTimestamp: %s, ", *h.EventTimestamp))
@@ -294,22 +298,22 @@ func SWFDecisionTypes() []string {
 }
 
 //L is a helper so you dont have to type aws.Long(myLong)
-func L(l int64) aws.LongValue {
-	return aws.Long(l)
+func L(l int64) *int64 {
+	return aws.Int64(l)
 }
 
 //I is a helper so you dont have to type aws.Long(int64(myInt))
-func I(i int) aws.LongValue {
-	return aws.Long(int64(i))
+func I(i int) *int64 {
+	return aws.Int64(int64(i))
 }
 
 //S is a helper so you dont have to type aws.String(myString)
-func S(s string) aws.StringValue {
+func S(s string) *string {
 	return aws.String(s)
 }
 
 //LS is a helper so you dont have to do nil checks before logging aws.StringValue values
-func LS(s aws.StringValue) string {
+func LS(s *string) string {
 	if s == nil {
 		return "nil"
 	}
@@ -317,7 +321,7 @@ func LS(s aws.StringValue) string {
 }
 
 //LL is a helper so you dont have to do nil checks before logging aws.LongValue values
-func LL(l aws.LongValue) string {
+func LL(l *int64) string {
 	if l == nil {
 		return "nil"
 	}

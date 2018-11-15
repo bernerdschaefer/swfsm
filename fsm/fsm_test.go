@@ -1,21 +1,26 @@
 package fsm
 
 import (
-	"log"
 	"strconv"
 	"testing"
 	"time"
 
-	"code.google.com/p/goprotobuf/proto"
-	"github.com/awslabs/aws-sdk-go/aws"
-	"github.com/awslabs/aws-sdk-go/gen/swf"
+	"errors"
+	"reflect"
+
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/service/swf"
+	. "github.com/sclasen/swfsm/log"
 	. "github.com/sclasen/swfsm/sugar"
+	"github.com/sclasen/swfsm/testing/mocks"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 )
 
 //Todo add tests of error handling mechanism
 //assert that the decisions have the mark and the signal external...hmm need workflow id for signal external.
 
-var testActivityInfo = ActivityInfo{ActivityID: "activityId", ActivityType: &swf.ActivityType{Name: S("activity"), Version: S("activityVersion")}}
+var testActivityInfo = ActivityInfo{ActivityId: "activityId", ActivityType: &swf.ActivityType{Name: S("activity"), Version: S("activityVersion")}}
 
 var typedFuncs = Typed(new(TestData))
 
@@ -25,33 +30,33 @@ func TestFSM(t *testing.T) {
 
 	fsm.AddInitialState(&FSMState{
 		Name: "start",
-		Decider: func(f *FSMContext, lastEvent swf.HistoryEvent, data interface{}) Outcome {
+		Decider: func(f *FSMContext, lastEvent *swf.HistoryEvent, data interface{}) Outcome {
 			testData := data.(*TestData)
 			testData.States = append(testData.States, "start")
 			serialized := f.Serialize(testData)
-			decision := swf.Decision{
+			decision := &swf.Decision{
 				DecisionType: S(swf.DecisionTypeScheduleActivityTask),
 				ScheduleActivityTaskDecisionAttributes: &swf.ScheduleActivityTaskDecisionAttributes{
-					ActivityID:   S(testActivityInfo.ActivityID),
+					ActivityId:   S(testActivityInfo.ActivityId),
 					ActivityType: testActivityInfo.ActivityType,
 					TaskList:     &swf.TaskList{Name: S("taskList")},
 					Input:        S(serialized),
 				},
 			}
 
-			return f.Goto("working", testData, []swf.Decision{decision})
+			return f.Goto("working", testData, []*swf.Decision{decision})
 
 		},
 	})
 
 	fsm.AddState(&FSMState{
 		Name: "working",
-		Decider: typedFuncs.Decider(func(f *FSMContext, lastEvent swf.HistoryEvent, testData *TestData) Outcome {
+		Decider: typedFuncs.Decider(func(f *FSMContext, lastEvent *swf.HistoryEvent, testData *TestData) Outcome {
 			testData.States = append(testData.States, "working")
 			serialized := f.Serialize(testData)
 			var decisions = f.EmptyDecisions()
 			if *lastEvent.EventType == swf.EventTypeActivityTaskCompleted {
-				decision := swf.Decision{
+				decision := &swf.Decision{
 					DecisionType: aws.String(swf.DecisionTypeCompleteWorkflowExecution),
 					CompleteWorkflowExecutionDecisionAttributes: &swf.CompleteWorkflowExecutionDecisionAttributes{
 						Result: S(serialized),
@@ -59,10 +64,10 @@ func TestFSM(t *testing.T) {
 				}
 				decisions = append(decisions, decision)
 			} else if *lastEvent.EventType == swf.EventTypeActivityTaskFailed {
-				decision := swf.Decision{
+				decision := &swf.Decision{
 					DecisionType: aws.String(swf.DecisionTypeScheduleActivityTask),
 					ScheduleActivityTaskDecisionAttributes: &swf.ScheduleActivityTaskDecisionAttributes{
-						ActivityID:   S(testActivityInfo.ActivityID),
+						ActivityId:   S(testActivityInfo.ActivityId),
 						ActivityType: testActivityInfo.ActivityType,
 						TaskList:     &swf.TaskList{Name: S("taskList")},
 						Input:        S(serialized),
@@ -75,17 +80,21 @@ func TestFSM(t *testing.T) {
 		}),
 	})
 
-	events := []swf.HistoryEvent{
-		swf.HistoryEvent{EventType: S("DecisionTaskStarted"), EventID: I(3)},
-		swf.HistoryEvent{EventType: S("DecisionTaskScheduled"), EventID: I(2)},
+	events := []*swf.HistoryEvent{
+		&swf.HistoryEvent{EventType: S("DecisionTaskStarted"), EventId: I(3)},
+		&swf.HistoryEvent{EventType: S("DecisionTaskScheduled"), EventId: I(2)},
 		EventFromPayload(1, &swf.WorkflowExecutionStartedEventAttributes{
-			Input: S(fsm.Serialize(new(TestData))),
+			Input: StartFSMWorkflowInput(fsm, new(TestData)),
 		}),
 	}
 
 	first := testDecisionTask(0, events)
 
-	_, decisions, _, _ := fsm.Tick(first)
+	_, decisions, _, err := fsm.Tick(first)
+
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if !Find(decisions, stateMarkerPredicate) {
 		t.Fatal("No Record State Marker")
@@ -99,6 +108,10 @@ func TestFSM(t *testing.T) {
 		t.Fatal("No ScheduleActivityTask")
 	}
 
+	if Find(decisions, errorMarkerPredicate) {
+		t.Fatal("Found Error Marker")
+	}
+
 	secondEvents := DecisionsToEvents(decisions)
 	secondEvents = append(secondEvents, events...)
 
@@ -108,7 +121,11 @@ func TestFSM(t *testing.T) {
 
 	second := testDecisionTask(3, secondEvents)
 
-	_, secondDecisions, _, _ := fsm.Tick(second)
+	_, secondDecisions, _, err := fsm.Tick(second)
+
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if !Find(secondDecisions, stateMarkerPredicate) {
 		t.Fatal("No Record State Marker")
@@ -118,67 +135,123 @@ func TestFSM(t *testing.T) {
 		t.Fatal("No CompleteWorkflow")
 	}
 
+	if Find(decisions, errorMarkerPredicate) {
+		t.Fatal("Found Error Marker")
+	}
 }
 
-func Find(decisions []swf.Decision, predicate func(swf.Decision) bool) bool {
+func TestFSMError(t *testing.T) {
+	fsm := testFSM()
+
+	fsm.AddInitialState(&FSMState{
+		Name: "start",
+		Decider: func(f *FSMContext, lastEvent *swf.HistoryEvent, data interface{}) Outcome {
+			panic("BOOM")
+		},
+	})
+	fsm.Init()
+
+	events := []*swf.HistoryEvent{
+		&swf.HistoryEvent{EventType: S("DecisionTaskStarted"), EventId: I(3)},
+		&swf.HistoryEvent{EventType: S("DecisionTaskScheduled"), EventId: I(2)},
+		EventFromPayload(1, &swf.WorkflowExecutionStartedEventAttributes{
+			Input: StartFSMWorkflowInput(fsm, new(TestData)),
+		}),
+	}
+
+	tasks := testDecisionTask(0, events)
+
+	fsm.AllowPanics = false
+	_, decisions, _, err := fsm.Tick(tasks)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !Find(decisions, stateMarkerPredicate) {
+		t.Fatal("No Record State Marker")
+	}
+
+	if !Find(decisions, correlationMarkerPredicate) {
+		t.Fatal("No Record Correlator Marker")
+	}
+
+	if !Find(decisions, errorMarkerPredicate) {
+		t.Fatal("No Error Marker")
+	}
+}
+
+func Find(decisions []*swf.Decision, predicate func(*swf.Decision) bool) bool {
 	return FindDecision(decisions, predicate) != nil
 }
 
-func FindDecision(decisions []swf.Decision, predicate func(swf.Decision) bool) *swf.Decision {
+func FindDecision(decisions []*swf.Decision, predicate func(*swf.Decision) bool) *swf.Decision {
 	for _, d := range decisions {
 		if predicate(d) {
-			return &d
+			return d
 		}
 	}
 	return nil
 }
 
-func stateMarkerPredicate(d swf.Decision) bool {
+func stateMarkerPredicate(d *swf.Decision) bool {
 	return *d.DecisionType == "RecordMarker" && *d.RecordMarkerDecisionAttributes.MarkerName == StateMarker
 }
 
-func correlationMarkerPredicate(d swf.Decision) bool {
+func correlationMarkerPredicate(d *swf.Decision) bool {
 	return *d.DecisionType == "RecordMarker" && *d.RecordMarkerDecisionAttributes.MarkerName == CorrelatorMarker
 }
 
-func scheduleActivityPredicate(d swf.Decision) bool {
+func errorMarkerPredicate(d *swf.Decision) bool {
+	return *d.DecisionType == "RecordMarker" && *d.RecordMarkerDecisionAttributes.MarkerName == ErrorMarker
+}
+
+func scheduleActivityPredicate(d *swf.Decision) bool {
 	return *d.DecisionType == "ScheduleActivityTask"
 }
 
-func completeWorkflowPredicate(d swf.Decision) bool {
+func completeWorkflowPredicate(d *swf.Decision) bool {
 	return *d.DecisionType == "CompleteWorkflowExecution"
 }
 
-func startTimerPredicate(d swf.Decision) bool {
+func cancelWorkflowPredicate(d *swf.Decision) bool {
+	return *d.DecisionType == "CancelWorkflowExecution"
+}
+
+func failWorkflowPredicate(d *swf.Decision) bool {
+	return *d.DecisionType == "FailWorkflowExecution"
+}
+
+func startTimerPredicate(d *swf.Decision) bool {
 	return *d.DecisionType == "StartTimer"
 }
 
-func DecisionsToEvents(decisions []swf.Decision) []swf.HistoryEvent {
-	var events []swf.HistoryEvent
+func DecisionsToEvents(decisions []*swf.Decision) []*swf.HistoryEvent {
+	var events []*swf.HistoryEvent
 	for _, d := range decisions {
 		if scheduleActivityPredicate(d) {
-			event := swf.HistoryEvent{
+			event := &swf.HistoryEvent{
 				EventType: S("ActivityTaskCompleted"),
-				EventID:   I(7),
+				EventId:   I(7),
 				ActivityTaskCompletedEventAttributes: &swf.ActivityTaskCompletedEventAttributes{
-					ScheduledEventID: I(6),
+					ScheduledEventId: I(6),
 				},
 			}
 			events = append(events, event)
-			event = swf.HistoryEvent{
+			event = &swf.HistoryEvent{
 				EventType: S("ActivityTaskScheduled"),
-				EventID:   I(6),
+				EventId:   I(6),
 				ActivityTaskScheduledEventAttributes: &swf.ActivityTaskScheduledEventAttributes{
-					ActivityID:   S(testActivityInfo.ActivityID),
+					ActivityId:   S(testActivityInfo.ActivityId),
 					ActivityType: testActivityInfo.ActivityType,
 				},
 			}
 			events = append(events, event)
 		}
 		if stateMarkerPredicate(d) {
-			event := swf.HistoryEvent{
+			event := &swf.HistoryEvent{
 				EventType: S("MarkerRecorded"),
-				EventID:   I(5),
+				EventId:   I(5),
 				MarkerRecordedEventAttributes: &swf.MarkerRecordedEventAttributes{
 					MarkerName: S(StateMarker),
 					Details:    d.RecordMarkerDecisionAttributes.Details,
@@ -195,8 +268,12 @@ type TestData struct {
 	States []string
 }
 
+func (t *TestData) Tags() []*string {
+	return []*string{S("tag1"), S("tag2")}
+}
+
 func TestMarshalledDecider(t *testing.T) {
-	typedDecider := func(f *FSMContext, h swf.HistoryEvent, d *TestData) Outcome {
+	typedDecider := func(f *FSMContext, h *swf.HistoryEvent, d *TestData) Outcome {
 		if d.States[0] != "marshalled" {
 			t.Fail()
 		}
@@ -205,87 +282,17 @@ func TestMarshalledDecider(t *testing.T) {
 
 	wrapped := typedFuncs.Decider(typedDecider)
 
-	outcome := wrapped(&FSMContext{}, swf.HistoryEvent{}, &TestData{States: []string{"marshalled"}})
+	outcome := wrapped(&FSMContext{}, &swf.HistoryEvent{}, &TestData{States: []string{"marshalled"}})
 
 	if outcome.State != "ok" {
 		t.Fatal("NextState was not 'ok'")
 	}
 }
 
-func TestPanicRecovery(t *testing.T) {
-	s := &FSMState{
-		Name: "panic",
-		Decider: func(f *FSMContext, e swf.HistoryEvent, data interface{}) Outcome {
-			panic("can you handle it?")
-		},
-	}
-	f := &FSM{}
-	f.AddInitialState(s)
-	_, err := f.panicSafeDecide(s, new(FSMContext), swf.HistoryEvent{}, nil)
-	if err == nil {
-		t.Fatal("fatallz")
-	} else {
-		log.Println(err)
-	}
-}
-
-func TestProtobufSerialization(t *testing.T) {
-	ser := &ProtobufStateSerializer{}
-	key := "FOO"
-	val := "BAR"
-	init := &ConfigVar{Key: &key, Str: &val}
-	serialized, err := ser.Serialize(init)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	log.Println(serialized)
-
-	deserialized := new(ConfigVar)
-	err = ser.Deserialize(serialized, deserialized)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if init.GetKey() != deserialized.GetKey() {
-		t.Fatal(init, deserialized)
-	}
-
-	if init.GetStr() != deserialized.GetStr() {
-		t.Fatal(init, deserialized)
-	}
-}
-
-//This is c&p from som generated code
-
-type ConfigVar struct {
-	Key             *string `protobuf:"bytes,1,req,name=key" json:"key,omitempty"`
-	Str             *string `protobuf:"bytes,2,opt,name=str" json:"str,omitempty"`
-	XXXunrecognized []byte  `json:"-"`
-}
-
-func (m *ConfigVar) Reset()         { *m = ConfigVar{} }
-func (m *ConfigVar) String() string { return proto.CompactTextString(m) }
-func (*ConfigVar) ProtoMessage()    {}
-
-func (m *ConfigVar) GetKey() string {
-	if m != nil && m.Key != nil {
-		return *m.Key
-	}
-	return ""
-}
-
-func (m *ConfigVar) GetStr() string {
-	if m != nil && m.Str != nil {
-		return *m.Str
-	}
-	return ""
-}
-
 func ExampleFSM() {
 	// create with swf.NewClient
 	var client *swf.SWF
-	// data type that will be managed by the FSM
+	// data type that will be managed by the
 	type StateData struct {
 		Message string `json:"message,omitempty"`
 		Count   int    `json:"count,omitempty"`
@@ -299,7 +306,7 @@ func ExampleFSM() {
 	//the FSM we will create will oscillate between 2 states,
 	//waitForSignal -> will wait till the workflow is started or signalled, and update the StateData based on the Hello message received, set a timer, and transition to waitForTimer
 	//waitForTimer -> will wait till the timer set by waitForSignal fires, and will signal the workflow with a Hello message, and transition to waitFotSignal
-	waitForSignal := func(f *FSMContext, h swf.HistoryEvent, d *StateData) Outcome {
+	waitForSignal := func(f *FSMContext, h *swf.HistoryEvent, d *StateData) Outcome {
 		decisions := f.EmptyDecisions()
 		switch *h.EventType {
 		case swf.EventTypeWorkflowExecutionStarted, swf.EventTypeWorkflowExecutionSignaled:
@@ -310,11 +317,11 @@ func ExampleFSM() {
 				d.Message = hello.Message
 			}
 			timeoutSeconds := "5" //swf uses stringy numbers in many places
-			timerDecision := swf.Decision{
+			timerDecision := &swf.Decision{
 				DecisionType: S(swf.DecisionTypeStartTimer),
 				StartTimerDecisionAttributes: &swf.StartTimerDecisionAttributes{
 					StartToFireTimeout: S(timeoutSeconds),
-					TimerID:            S("timeToSignal"),
+					TimerId:            S("timeToSignal"),
 				},
 			}
 			decisions = append(decisions, timerDecision)
@@ -325,20 +332,20 @@ func ExampleFSM() {
 
 	}
 
-	waitForTimer := func(f *FSMContext, h swf.HistoryEvent, d *StateData) Outcome {
+	waitForTimer := func(f *FSMContext, h *swf.HistoryEvent, d *StateData) Outcome {
 		decisions := f.EmptyDecisions()
 		switch *h.EventType {
 		case swf.EventTypeTimerFired:
 			//every time the timer fires, signal the workflow with a Hello
 			message := strconv.FormatInt(time.Now().Unix(), 10)
 			signalInput := &Hello{message}
-			signalDecision := swf.Decision{
+			signalDecision := &swf.Decision{
 				DecisionType: S(swf.DecisionTypeSignalExternalWorkflowExecution),
 				SignalExternalWorkflowExecutionDecisionAttributes: &swf.SignalExternalWorkflowExecutionDecisionAttributes{
 					SignalName: S("hello"),
 					Input:      S(f.Serialize(signalInput)),
-					RunID:      f.RunID,
-					WorkflowID: f.WorkflowID,
+					RunId:      f.RunId,
+					WorkflowId: f.WorkflowId,
 				},
 			}
 			decisions = append(decisions, signalDecision)
@@ -352,34 +359,34 @@ func ExampleFSM() {
 	//These 2 deciders are the same as the ones above, but use composable decider bits.
 	typed := Typed(new(StateData))
 
-	updateState := typed.StateFunc(func(f *FSMContext, h swf.HistoryEvent, d *StateData) {
+	updateState := typed.StateFunc(func(f *FSMContext, h *swf.HistoryEvent, d *StateData) {
 		hello := &Hello{}
 		f.EventData(h, &Hello{})
 		d.Count++
 		d.Message = hello.Message
 	})
 
-	setTimer := typed.DecisionFunc(func(f *FSMContext, h swf.HistoryEvent, d *StateData) swf.Decision {
+	setTimer := typed.DecisionFunc(func(f *FSMContext, h *swf.HistoryEvent, d *StateData) *swf.Decision {
 		timeoutSeconds := "5" //swf uses stringy numbers in many places
-		return swf.Decision{
+		return &swf.Decision{
 			DecisionType: S(swf.DecisionTypeStartTimer),
 			StartTimerDecisionAttributes: &swf.StartTimerDecisionAttributes{
 				StartToFireTimeout: S(timeoutSeconds),
-				TimerID:            S("timeToSignal"),
+				TimerId:            S("timeToSignal"),
 			},
 		}
 	})
 
-	sendSignal := typed.DecisionFunc(func(f *FSMContext, h swf.HistoryEvent, d *StateData) swf.Decision {
+	sendSignal := typed.DecisionFunc(func(f *FSMContext, h *swf.HistoryEvent, d *StateData) *swf.Decision {
 		message := strconv.FormatInt(time.Now().Unix(), 10)
 		signalInput := &Hello{message}
-		return swf.Decision{
+		return &swf.Decision{
 			DecisionType: S(swf.DecisionTypeSignalExternalWorkflowExecution),
 			SignalExternalWorkflowExecutionDecisionAttributes: &swf.SignalExternalWorkflowExecutionDecisionAttributes{
 				SignalName: S("hello"),
 				Input:      S(f.Serialize(signalInput)),
-				RunID:      f.RunID,
-				WorkflowID: f.WorkflowID,
+				RunId:      f.RunId,
+				WorkflowId: f.WorkflowId,
 			},
 		}
 	})
@@ -421,10 +428,10 @@ func ExampleFSM() {
 	//To start workflows using this fsm
 	client.StartWorkflowExecution(&swf.StartWorkflowExecutionInput{
 		Domain:     S("exaple-swf-domain"),
-		WorkflowID: S("your-id"),
+		WorkflowId: S("your-id"),
 		//you will have previously regiestered a WorkflowType that this FSM will work.
 		WorkflowType: &swf.WorkflowType{Name: S("the-name"), Version: S("the-version")},
-		Input:        S(fsm.Serialize(&StateData{Count: 0, Message: "starting message"})),
+		Input:        StartFSMWorkflowInput(fsm, &StateData{Count: 0, Message: "starting message"}),
 	})
 }
 
@@ -433,7 +440,7 @@ func TestContinuedWorkflows(t *testing.T) {
 
 	fsm.AddInitialState(&FSMState{
 		Name: "ok",
-		Decider: func(f *FSMContext, h swf.HistoryEvent, d interface{}) Outcome {
+		Decider: func(f *FSMContext, h *swf.HistoryEvent, d interface{}) Outcome {
 			if *h.EventType == swf.EventTypeWorkflowExecutionStarted && d.(*TestData).States[0] == "continuing" {
 				return f.Stay(d, nil)
 			}
@@ -449,18 +456,18 @@ func TestContinuedWorkflows(t *testing.T) {
 	}
 
 	serializedState := fsm.Serialize(state)
-	resp := testDecisionTask(4, []swf.HistoryEvent{swf.HistoryEvent{
+	resp := testDecisionTask(4, []*swf.HistoryEvent{&swf.HistoryEvent{
 		EventType: S(swf.EventTypeWorkflowExecutionStarted),
 		WorkflowExecutionStartedEventAttributes: &swf.WorkflowExecutionStartedEventAttributes{
-			Input: S(serializedState),
-			ContinuedExecutionRunID: S("someRunId"),
+			Input:                   S(serializedState),
+			ContinuedExecutionRunId: S("someRunId"),
 		},
 	}})
 
-	log.Printf("%+v", resp)
+	Log.Printf("%+v", resp)
 	_, decisions, updatedState, _ := fsm.Tick(resp)
 
-	log.Println(updatedState)
+	Log.Println(updatedState)
 
 	if updatedState.StateVersion != 24 {
 		t.Fatal("StateVersion !=24 ", updatedState.StateVersion)
@@ -480,7 +487,7 @@ func TestContinueWorkflowDecision(t *testing.T) {
 
 	fsm.AddInitialState(&FSMState{
 		Name: "InitialState",
-		Decider: func(ctx *FSMContext, h swf.HistoryEvent, data interface{}) Outcome {
+		Decider: func(ctx *FSMContext, h *swf.HistoryEvent, data interface{}) Outcome {
 			return ctx.Pass()
 		},
 	},
@@ -495,6 +502,11 @@ func TestContinueWorkflowDecision(t *testing.T) {
 		t.Fatal(testData, cont)
 	}
 
+	tags := cont.ContinueAsNewWorkflowExecutionDecisionAttributes.TagList
+	if len(tags) != 2 || *tags[0] != "tag1" || *tags[1] != "tag2" {
+		t.Fatal(testData, cont)
+	}
+
 }
 
 func TestCompleteState(t *testing.T) {
@@ -502,11 +514,11 @@ func TestCompleteState(t *testing.T) {
 
 	ctx := testContext(fsm)
 
-	event := swf.HistoryEvent{
-		EventID:   I(1),
+	event := &swf.HistoryEvent{
+		EventId:   I(1),
 		EventType: S("WorkflowExecutionStarted"),
 		WorkflowExecutionStartedEventAttributes: &swf.WorkflowExecutionStartedEventAttributes{
-			Input: S(fsm.Serialize(new(TestData))),
+			Input: StartFSMWorkflowInput(fsm, new(TestData)),
 		},
 	}
 
@@ -526,20 +538,20 @@ func TestCompleteState(t *testing.T) {
 func TestEntryDecisions(t *testing.T) {
 	fsm := testFSM()
 
-	event := swf.HistoryEvent{
-		EventID:   I(1),
+	event := &swf.HistoryEvent{
+		EventId:   I(1),
 		EventType: S("WorkflowExecutionStarted"),
 		WorkflowExecutionStartedEventAttributes: &swf.WorkflowExecutionStartedEventAttributes{
 			Input: S(fsm.Serialize(new(TestData))),
 		},
 	}
 
-	entryDecisions := func(ctx *FSMContext, h swf.HistoryEvent, data interface{}) []swf.Decision {
+	entryDecisions := func(ctx *FSMContext, h *swf.HistoryEvent, data interface{}) []*swf.Decision {
 		t.Logf("IN ENTRY DECISIONS")
-		return []swf.Decision{swf.Decision{
+		return []*swf.Decision{&swf.Decision{
 			DecisionType: S(swf.DecisionTypeScheduleActivityTask),
 			ScheduleActivityTaskDecisionAttributes: &swf.ScheduleActivityTaskDecisionAttributes{
-				ActivityID:   S(testActivityInfo.ActivityID),
+				ActivityId:   S(testActivityInfo.ActivityId),
 				ActivityType: testActivityInfo.ActivityType,
 				TaskList:     &swf.TaskList{Name: S("taskList")},
 				Input:        S(""),
@@ -549,7 +561,7 @@ func TestEntryDecisions(t *testing.T) {
 
 	fsm.AddInitialState(&FSMState{
 		Name: "InitialState",
-		Decider: func(ctx *FSMContext, h swf.HistoryEvent, data interface{}) Outcome {
+		Decider: func(ctx *FSMContext, h *swf.HistoryEvent, data interface{}) Outcome {
 			t.Logf("IN INITIAL STATE")
 			return ctx.Goto("SecondState", data, ctx.EmptyDecisions())
 		},
@@ -557,7 +569,7 @@ func TestEntryDecisions(t *testing.T) {
 
 	fsm.AddState(&FSMState{
 		Name: "SecondState",
-		Decider: func(ctx *FSMContext, h swf.HistoryEvent, data interface{}) Outcome {
+		Decider: func(ctx *FSMContext, h *swf.HistoryEvent, data interface{}) Outcome {
 			t.Logf("IN SECOND STATE")
 			return ctx.Stay(data, ctx.EmptyDecisions())
 		},
@@ -567,15 +579,15 @@ func TestEntryDecisions(t *testing.T) {
 	fsm.Init()
 
 	_, decisions, state, _ := fsm.Tick(
-		&swf.DecisionTask{
-			Events:                 []swf.HistoryEvent{event},
-			PreviousStartedEventID: L(0),
-			StartedEventID:         L(1),
+		&swf.PollForDecisionTaskOutput{
+			Events:                 []*swf.HistoryEvent{event},
+			PreviousStartedEventId: L(0),
+			StartedEventId:         L(1),
 
 			TaskToken: S("token"),
 			WorkflowExecution: &swf.WorkflowExecution{
-				WorkflowID: S("fii"),
-				RunID:      S("run"),
+				WorkflowId: S("fii"),
+				RunId:      S("run"),
 			},
 			WorkflowType: &swf.WorkflowType{
 				Name:    S("foo"),
@@ -603,13 +615,299 @@ func TestEntryDecisions(t *testing.T) {
 	}
 }
 
+func TestFailState(t *testing.T) {
+	fsm := testFSM()
+
+	ctx := testContext(fsm)
+
+	event := &swf.HistoryEvent{
+		EventId:   I(1),
+		EventType: S("WorkflowExecutionStarted"),
+		WorkflowExecutionStartedEventAttributes: &swf.WorkflowExecutionStartedEventAttributes{
+			Input: StartFSMWorkflowInput(fsm, new(TestData)),
+		},
+	}
+
+	fsm.AddInitialState(fsm.DefaultFailedState())
+	fsm.Init()
+	outcome := fsm.failedState.Decider(ctx, event, new(TestData))
+
+	if len(outcome.Decisions) != 1 {
+		t.Fatal(outcome)
+	}
+
+	if *outcome.Decisions[0].DecisionType != swf.DecisionTypeFailWorkflowExecution {
+		t.Fatal(outcome)
+	}
+}
+
+func TestSerializationInterface(t *testing.T) {
+	f := func(s Serialization) {
+
+	}
+
+	f(&FSM{})
+	f(&FSMContext{})
+}
+
+func TestTaskReady(t *testing.T) {
+	f := testFSM()
+	prevStarted := testHistoryEvent(1, swf.EventTypeDecisionTaskStarted)
+	missed := testHistoryEvent(2, swf.EventTypeWorkflowExecutionSignaled)
+	missed.WorkflowExecutionSignaledEventAttributes = &swf.WorkflowExecutionSignaledEventAttributes{SignalName: S("Important")}
+	state := testHistoryEvent(3, swf.EventTypeMarkerRecorded)
+	state.MarkerRecordedEventAttributes = &swf.MarkerRecordedEventAttributes{MarkerName: S(StateMarker)}
+	correlator := testHistoryEvent(4, swf.EventTypeMarkerRecorded)
+	correlator.MarkerRecordedEventAttributes = &swf.MarkerRecordedEventAttributes{MarkerName: S(CorrelatorMarker)}
+	task := testDecisionTask(1, []*swf.HistoryEvent{correlator, state})
+	if f.taskReady(task) {
+		t.Fatal("task signaled ready, and events were missed")
+	}
+	task.Events = append(task.Events, missed, prevStarted)
+	if !f.taskReady(task) {
+		t.Fatal("task not signaled ready, but state correlator and prevStarted were present")
+	}
+}
+
+func TestStasher(t *testing.T) {
+
+	mapIn := make(map[string]interface{})
+	stasher := NewStasher(mapIn)
+	buf := stasher.Stash(mapIn)
+	stasher.Unstash(buf, &mapIn)
+
+	in := &TestData{
+		States: []string{"test123"},
+	}
+
+	stasher = NewStasher(&TestData{})
+	//make a second to verify gob.Register doesnt panic on dupes.
+	stasher = NewStasher(&TestData{})
+
+	buf = stasher.Stash(in)
+
+	out := &TestData{}
+	stasher.Unstash(buf, out)
+
+	if out.States[0] != "test123" {
+		t.Fatal("bad stasher")
+	}
+
+}
+
+func TestInitWhenTaskErrorHandlerNotSetExpectsDefaultUsed(t *testing.T) {
+	// arrange
+	f := testFSM()
+	f.AddInitialState(f.DefaultCompleteState())
+
+	// act
+	f.Init()
+
+	// assert
+	assert.Equal(t, reflect.ValueOf(f.DefaultTaskErrorHandler).Pointer(), reflect.ValueOf(f.TaskErrorHandler).Pointer(),
+		"Expected TaskErrorHandler to default to the DefaultTaskErrorHandler upon Init() if none is set")
+}
+
+func TestInitWhenTaskErrorHandlerSetExpectsSetFuncUsed(t *testing.T) {
+	// arrange
+	f := testFSM()
+	f.AddInitialState(f.DefaultCompleteState())
+	expectedHandler := func(decisionTask *swf.PollForDecisionTaskOutput, err error) {}
+	f.TaskErrorHandler = expectedHandler
+
+	// act
+	f.Init()
+
+	// assert
+	assert.Equal(t, reflect.ValueOf(expectedHandler).Pointer(), reflect.ValueOf(f.TaskErrorHandler).Pointer(),
+		"Expected FSM to use the set handler after Init()")
+}
+
+func TestInitWhenDecisionInterceptorNotSetExpectsSomeDefaultUsed(t *testing.T) {
+	// arrange
+	f := testFSM()
+	f.AddInitialState(f.DefaultCompleteState())
+
+	// act
+	f.Init()
+
+	// assert
+	assert.NotNil(t, f.DecisionInterceptor,
+		"Expected DecisionInterceptor to be non-nil after Init() even if none is set")
+}
+
+func TestInitWhenDecisionInterceptorSetExpectsSetInterceptorUsed(t *testing.T) {
+	// arrange
+	f := testFSM()
+	f.AddInitialState(f.DefaultCompleteState())
+	expectedInterceptor := &FuncInterceptor{}
+	f.DecisionInterceptor = expectedInterceptor
+
+	// act
+	f.Init()
+
+	// assert
+	assert.Equal(t, expectedInterceptor, f.DecisionInterceptor,
+		"Expected DecisionInterceptor to use the set interceptor after Init()")
+}
+
+func TestDefaultDecisionInterceptorExpectsCloseDecisionsDedupedMovedAndPrioritized(t *testing.T) {
+	// arrange
+	f := testFSM()
+	f.AddInitialState(f.DefaultCompleteState())
+	outcome := &Outcome{
+		State:     "state",
+		Data:      "data",
+		Decisions: []*swf.Decision{timerDecision(), completeDecision(), completeDecision(), cancelDecision(), cancelDecision(), failDecision(), failDecision(), timerDecision()},
+	}
+	interceptor := f.DefaultDecisionInterceptor()
+
+	// act
+	interceptor.AfterDecision(nil, interceptorTestContext(), outcome)
+
+	// assert
+	assert.Len(t, outcome.Decisions, 3, "Expected outcome to have 3 decisions after deduping"+
+		" and prioritization because all 'completes', 'cancels', and duplicates should have been removed")
+	assert.Equal(t, []*swf.Decision{timerDecision(), timerDecision(), failDecision()},
+		outcome.Decisions, "Expected a single highest priority close decision to be at the end of the decision list and other decisions to be retained.")
+}
+
+func TestHandleDecisionTaskWhenTickErrorsExpectsTaskErrorHandlerCalled(t *testing.T) {
+	// arrange
+	f := testFSM()
+	f.AddInitialState(f.DefaultCompleteState())
+	handlerCalled := false
+	expectedHandler := func(decisionTask *swf.PollForDecisionTaskOutput, err error) {
+		handlerCalled = true
+	}
+	f.TaskErrorHandler = expectedHandler
+	events := []*swf.HistoryEvent{
+		&swf.HistoryEvent{EventType: S("DecisionTaskStarted"), EventId: I(3)},
+		&swf.HistoryEvent{EventType: S("DecisionTaskScheduled"), EventId: I(2)},
+	}
+	decisionTask := testDecisionTask(1, events)
+	f.Init()
+	f.AllowPanics = false
+
+	// act
+	f.handleDecisionTask(decisionTask)
+
+	// assert
+	assert.True(t, handlerCalled, "Expected handler called because Tick errored")
+}
+
+func TestHandleDecisionTaskWhenRespondingToSWFErrorsExpectsTaskErrorHandlerCalled(t *testing.T) {
+	// arrange
+	f := testFSM()
+	f.AddInitialState(f.DefaultCompleteState())
+
+	handlerCalled := false
+	expectedHandler := func(decisionTask *swf.PollForDecisionTaskOutput, err error) {
+		handlerCalled = true
+	}
+	f.TaskErrorHandler = expectedHandler
+
+	events := []*swf.HistoryEvent{
+		&swf.HistoryEvent{EventType: S("DecisionTaskStarted"), EventId: I(3)},
+		&swf.HistoryEvent{EventType: S("DecisionTaskScheduled"), EventId: I(2)},
+		EventFromPayload(1, &swf.WorkflowExecutionStartedEventAttributes{
+			Input: StartFSMWorkflowInput(f, new(TestData)),
+		}),
+	}
+	decisionTask := testDecisionTask(0, events)
+
+	f.AllowPanics = false
+	mockSWFAPI := &mocks.SWFAPI{}
+	expectedError := errors.New("Some SWF error")
+	mockSWFAPI.MockOn_RespondDecisionTaskCompleted(mock.Anything).Return(nil, expectedError)
+	f.SWF = mockSWFAPI
+
+	// act
+	f.Init()
+	f.handleDecisionTask(decisionTask)
+
+	// assert
+	assert.True(t, handlerCalled, "Expected handler called because RespondDecisionTaskCompleted errored")
+}
+
+func TestHandleDecisionTaskReplicationErrorsExpectsTaskErrorHandlerCalled(t *testing.T) {
+	// arrange
+	f := testFSM()
+	f.AddInitialState(f.DefaultCompleteState())
+
+	handlerCalled := false
+	expectedHandler := func(decisionTask *swf.PollForDecisionTaskOutput, err error) {
+		handlerCalled = true
+	}
+	f.TaskErrorHandler = expectedHandler
+
+	events := []*swf.HistoryEvent{
+		&swf.HistoryEvent{EventType: S("DecisionTaskStarted"), EventId: I(3)},
+		&swf.HistoryEvent{EventType: S("DecisionTaskScheduled"), EventId: I(2)},
+		EventFromPayload(1, &swf.WorkflowExecutionStartedEventAttributes{
+			Input: StartFSMWorkflowInput(f, new(TestData)),
+		}),
+	}
+	decisionTask := testDecisionTask(0, events)
+
+	f.AllowPanics = false
+	mockSWFAPI := &mocks.SWFAPI{}
+	mockSWFAPI.MockOn_RespondDecisionTaskCompleted(mock.Anything).Return(nil, nil)
+	f.SWF = mockSWFAPI
+	f.ReplicationHandler = func(*FSMContext, *swf.PollForDecisionTaskOutput, *swf.RespondDecisionTaskCompletedInput, *SerializedState) error {
+		return errors.New("Some replication error")
+	}
+
+	// act
+	f.Init()
+	f.handleDecisionTask(decisionTask)
+
+	// assert
+	assert.True(t, handlerCalled, "Expected handler called because there was a replication error")
+}
+
+func TestHandleDecisionTaskWhenNoErrorsExpectsTaskErrorHandlerNotCalled(t *testing.T) {
+	// arrange
+	f := testFSM()
+	f.AddInitialState(f.DefaultCompleteState())
+
+	handlerCalled := false
+	expectedHandler := func(decisionTask *swf.PollForDecisionTaskOutput, err error) {
+		handlerCalled = true
+	}
+	f.TaskErrorHandler = expectedHandler
+
+	events := []*swf.HistoryEvent{
+		&swf.HistoryEvent{EventType: S("DecisionTaskStarted"), EventId: I(3)},
+		&swf.HistoryEvent{EventType: S("DecisionTaskScheduled"), EventId: I(2)},
+		EventFromPayload(1, &swf.WorkflowExecutionStartedEventAttributes{
+			Input: StartFSMWorkflowInput(f, new(TestData)),
+		}),
+	}
+	decisionTask := testDecisionTask(0, events)
+
+	mockSWFAPI := &mocks.SWFAPI{}
+	mockSWFAPI.MockOn_RespondDecisionTaskCompleted(mock.Anything).Return(nil, nil)
+	f.SWF = mockSWFAPI
+	f.ReplicationHandler = func(*FSMContext, *swf.PollForDecisionTaskOutput, *swf.RespondDecisionTaskCompletedInput, *SerializedState) error {
+		return nil
+	}
+
+	// act
+	f.Init()
+	f.handleDecisionTask(decisionTask)
+
+	// assert
+	assert.False(t, handlerCalled, "Expected handler not called because nothing errored")
+}
+
 func testFSM() *FSM {
 	fsm := &FSM{
 		Name:             "test-fsm",
 		DataType:         TestData{},
 		Serializer:       JSONStateSerializer{},
-		systemSerializer: JSONStateSerializer{},
-		allowPanics:      true,
+		SystemSerializer: JSONStateSerializer{},
+		AllowPanics:      true,
 	}
 	return fsm
 }
@@ -618,37 +916,37 @@ func testContext(fsm *FSM) *FSMContext {
 	return NewFSMContext(
 		fsm,
 		swf.WorkflowType{Name: S("test-workflow"), Version: S("1")},
-		swf.WorkflowExecution{WorkflowID: S("test-workflow-1"), RunID: S("123123")},
-		&EventCorrelator{},
+		swf.WorkflowExecution{WorkflowId: S("test-workflow-1"), RunId: S("123123")},
+		&EventCorrelator{Serializer: JSONStateSerializer{}},
 		"InitialState", &TestData{}, 0,
 	)
 }
 
-func testDecisionTask(prevStarted int, events []swf.HistoryEvent) *swf.DecisionTask {
+func testDecisionTask(prevStarted int, events []*swf.HistoryEvent) *swf.PollForDecisionTaskOutput {
 
-	d := &swf.DecisionTask{
+	d := &swf.PollForDecisionTaskOutput{
 		Events:                 events,
-		PreviousStartedEventID: I(prevStarted),
-		StartedEventID:         I(prevStarted + len(events)),
+		PreviousStartedEventId: I(prevStarted),
+		StartedEventId:         I(prevStarted + len(events)),
 		WorkflowExecution:      testWorkflowExecution,
 		WorkflowType:           testWorkflowType,
 	}
 	for i, e := range d.Events {
-		if e.EventID == nil {
-			e.EventID = L(*d.StartedEventID - int64(i))
+		if e.EventId == nil {
+			e.EventId = L(*d.StartedEventId - int64(i))
 		}
-		e.EventTimestamp = &aws.UnixTimestamp{time.Unix(0, 0)}
+		e.EventTimestamp = aws.Time(time.Unix(0, 0))
 		d.Events[i] = e
 	}
 	return d
 }
 
-func testHistoryEvent(eventID int, eventType string) swf.HistoryEvent {
-	return swf.HistoryEvent{
-		EventID:   I(eventID),
+func testHistoryEvent(eventId int, eventType string) *swf.HistoryEvent {
+	return &swf.HistoryEvent{
+		EventId:   I(eventId),
 		EventType: S(eventType),
 	}
 }
 
-var testWorkflowExecution = &swf.WorkflowExecution{WorkflowID: S("workflow-id"), RunID: S("run-id")}
+var testWorkflowExecution = &swf.WorkflowExecution{WorkflowId: S("workflow-id"), RunId: S("run-id")}
 var testWorkflowType = &swf.WorkflowType{Name: S("workflow-name"), Version: S("workflow-version")}

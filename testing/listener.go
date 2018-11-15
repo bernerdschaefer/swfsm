@@ -6,13 +6,20 @@ import (
 
 	"fmt"
 
-	"code.google.com/p/go-uuid/uuid"
-	"github.com/awslabs/aws-sdk-go/gen/swf"
+	"reflect"
+
+	"strings"
+
+	"github.com/aws/aws-sdk-go/service/swf"
+	"github.com/pborman/uuid"
 	"github.com/sclasen/swfsm/activity"
 	"github.com/sclasen/swfsm/fsm"
 )
 
+const interestChannelSize = 1000
+
 type TestAdapter interface {
+	TestName() string
 	Logf(format string, args ...interface{})
 	Fatalf(format string, args ...interface{})
 	FailNow()
@@ -25,30 +32,72 @@ type TestConfig struct {
 	Workers               []*activity.ActivityWorker
 	StubbedWorkflows      []string
 	ShortStubbedWorkflows []string
+	DefaultWaitTimeout    int
+	FailActivitiesOnce    bool
+	ThrottleSignalsOnce   bool
+	ThrottleCancelsOnce   bool
+	ThrottleChildrenOnce  bool
+	ThrottleTimersOnce    bool
 }
 
 func NewTestListener(t TestConfig) *TestListener {
+	if t.DefaultWaitTimeout == 0 {
+		t.DefaultWaitTimeout = 10
+	}
 
 	tl := &TestListener{
-		decisionOutcomes: make(chan DecisionOutcome, 1000),
-		historyInterest:  make(map[string]chan swf.HistoryEvent, 1000),
-		decisionInterest: make(map[string]chan swf.Decision, 1000),
-		stateInterest:    make(map[string]chan string, 1000),
-		DefaultWait:      10 * time.Second,
+		decisionOutcomes: make(chan DecisionOutcome),
+		historyInterest:  make(map[string]chan *swf.HistoryEvent),
+		decisionInterest: make(map[string]chan *swf.Decision),
+		stateInterest:    make(map[string]chan string),
+		dataInterest:     make(map[string]chan *StateData),
+		DefaultWait:      time.Duration(t.DefaultWaitTimeout) * time.Second,
+		TestId:           strings.Join([]string{t.Testing.TestName(), uuid.New()}, "-"),
 		testAdapter:      t.Testing,
-		TestID:           uuid.New(),
+		dataType:         t.FSM.DataType,
+		serializer:       t.FSM.Serializer,
 	}
 
 	t.FSM.ReplicationHandler = TestReplicator(tl.decisionOutcomes)
-	t.FSM.DecisionInterceptor = TestInterceptor(tl.TestID, t.StubbedWorkflows, t.ShortStubbedWorkflows)
-	t.FSM.TaskList = tl.TestID
+
+	interceptors := []fsm.DecisionInterceptor{
+		t.FSM.DecisionInterceptor,
+		TestDecisionInterceptor(tl.TestId, t.StubbedWorkflows, t.ShortStubbedWorkflows),
+	}
+
+	if t.ThrottleCancelsOnce {
+		interceptors = append(interceptors, TestThrotteCancelsOnceInterceptor())
+	}
+
+	if t.ThrottleChildrenOnce {
+		interceptors = append(interceptors, TestThrotteChildrenOnceInterceptor())
+	}
+
+	if t.ThrottleSignalsOnce {
+		interceptors = append(interceptors, TestThrotteSignalsOnceInterceptor())
+	}
+
+	if t.ThrottleTimersOnce {
+		interceptors = append(interceptors, TestThrotteTimersOnceInterceptor(10))
+	}
+
+	t.FSM.DecisionInterceptor = fsm.NewComposedDecisionInterceptor(interceptors...)
+
+	t.FSM.TaskList = tl.TestFsmTaskList()
 
 	if t.StubFSM != nil {
 		t.StubFSM.ReplicationHandler = TestReplicator(tl.decisionOutcomes)
 	}
 
 	for _, w := range t.Workers {
-		w.TaskList = w.TaskList + tl.TestID
+		if t.FailActivitiesOnce {
+			w.ActivityInterceptor = activity.NewComposedDecisionInterceptor(
+				w.ActivityInterceptor,
+				TestFailOnceActivityInterceptor(),
+			)
+		}
+
+		w.TaskList = tl.TestWorkerTaskList(w)
 		w.AllowPanics = true
 	}
 
@@ -58,119 +107,182 @@ func NewTestListener(t TestConfig) *TestListener {
 
 type TestListener struct {
 	decisionOutcomes chan DecisionOutcome
-	historyInterest  map[string]chan swf.HistoryEvent
+	historyInterest  map[string]chan *swf.HistoryEvent
 	historyLock      sync.Mutex
-	decisionInterest map[string]chan swf.Decision
+	decisionInterest map[string]chan *swf.Decision
 	decisionLock     sync.Mutex
 	stateInterest    map[string]chan string
 	stateLock        sync.Mutex
+	dataInterest     map[string]chan *StateData
+	dataLock         sync.Mutex
 	DefaultWait      time.Duration
 	testAdapter      TestAdapter
-	TestID           string
+	TestId           string
+	dataType         interface{}
+	serializer       fsm.StateSerializer
 }
 
-func (tl *TestListener) RegisterHistoryInterest(workflowID string) chan swf.HistoryEvent {
+func (tl *TestListener) TestFsmTaskList() string {
+	return tl.TestId
+}
+
+func (tl *TestListener) TestWorkerTaskList(w *activity.ActivityWorker) string {
+	return w.TaskList + tl.TestId
+}
+
+func (tl *TestListener) getHistoryInterest(workflowId string) chan *swf.HistoryEvent {
 	defer tl.historyLock.Unlock()
 	tl.historyLock.Lock()
-	historyChan, ok := tl.historyInterest[workflowID]
+	historyChan, ok := tl.historyInterest[workflowId]
 	if !ok {
-		historyChan = make(chan swf.HistoryEvent, 1000)
-		tl.historyInterest[workflowID] = historyChan
+		historyChan = make(chan *swf.HistoryEvent, interestChannelSize)
+		tl.historyInterest[workflowId] = historyChan
 	}
 	return historyChan
 }
 
-func (tl *TestListener) RegisterDecisionInterest(workflowID string) chan swf.Decision {
+func (tl *TestListener) getDecisionInterest(workflowId string) chan *swf.Decision {
 	defer tl.decisionLock.Unlock()
 	tl.decisionLock.Lock()
-	decisionChan, ok := tl.decisionInterest[workflowID]
+	decisionChan, ok := tl.decisionInterest[workflowId]
 	if !ok {
-		decisionChan = make(chan swf.Decision, 1000)
-		tl.decisionInterest[workflowID] = decisionChan
+		decisionChan = make(chan *swf.Decision, interestChannelSize)
+		tl.decisionInterest[workflowId] = decisionChan
 	}
 	return decisionChan
 }
 
-func (tl *TestListener) RegisterStateInterest(workflowID string) chan string {
+func (tl *TestListener) getStateInterest(workflowId string) chan string {
 	defer tl.stateLock.Unlock()
 	tl.stateLock.Lock()
-	stateChan, ok := tl.stateInterest[workflowID]
+	stateChan, ok := tl.stateInterest[workflowId]
 	if !ok {
-		stateChan = make(chan string, 1000)
-		tl.stateInterest[workflowID] = stateChan
+		stateChan = make(chan string, interestChannelSize)
+		tl.stateInterest[workflowId] = stateChan
 	}
 	return stateChan
 }
 
-func (tl *TestListener) AwaitStateFor(workflowID, state string, waitFor time.Duration) {
-	ch := tl.RegisterStateInterest(workflowID)
+func (tl *TestListener) getDataInterest(workflowId string) chan *StateData {
+	defer tl.dataLock.Unlock()
+	tl.dataLock.Lock()
+	dataChan, ok := tl.dataInterest[workflowId]
+	if !ok {
+		dataChan = make(chan *StateData, interestChannelSize)
+		tl.dataInterest[workflowId] = dataChan
+	}
+	return dataChan
+}
+
+func (tl *TestListener) RegisterHistoryInterest(workflowId string) {
+	tl.testAdapter.Logf("DEPRECATED: Registration happens automatically now.")
+}
+
+func (tl *TestListener) RegisterDecisionInterest(workflowId string) {
+	tl.testAdapter.Logf("DEPRECATED: Registration happens automatically now.")
+}
+
+func (tl *TestListener) RegisterStateInterest(workflowId string) {
+	tl.testAdapter.Logf("DEPRECATED: Registration happens automatically now.")
+}
+
+func (tl *TestListener) RegisterDataInterest(workflowId string) {
+	tl.testAdapter.Logf("DEPRECATED: Registration happens automatically now.")
+}
+
+func (tl *TestListener) AwaitStateFor(workflowId, state string, waitFor time.Duration) {
+	ch := tl.getStateInterest(workflowId)
 	timer := time.After(waitFor)
 
 	for {
 		select {
 		case s := <-ch:
-			tl.testAdapter.Logf("TestListener: await state for workflow=%s state=%s received-state=%s", workflowID, state, s)
+			tl.testAdapter.Logf("TestListener: await state for workflow=%s state=%s received-state=%s", workflowId, state, s)
 			if s == state {
 				return
 			}
 		case <-timer:
-			panic(fmt.Sprintf("TestListener: timed out waiting for workflow=%s state=%s", workflowID, state))
-			tl.testAdapter.Fatalf("TestListener: timed out waiting for workflow=%s state=%s", workflowID, state)
+			panic(fmt.Sprintf("TestListener: timed out waiting for workflow=%s state=%s", workflowId, state))
+			tl.testAdapter.Fatalf("TestListener: timed out waiting for workflow=%s state=%s", workflowId, state)
 			tl.testAdapter.FailNow()
 		}
 	}
 }
 
-func (tl *TestListener) AwaitState(workflowID, state string) {
-	tl.AwaitStateFor(workflowID, state, tl.DefaultWait)
+func (tl *TestListener) AwaitState(workflowId, state string) {
+	tl.AwaitStateFor(workflowId, state, tl.DefaultWait)
 }
 
-func (tl *TestListener) AwaitEventFor(workflowID string, waitFor time.Duration, predicate func(swf.HistoryEvent) bool) {
-	ch := tl.RegisterHistoryInterest(workflowID)
+func (tl *TestListener) AwaitEventFor(workflowId string, waitFor time.Duration, predicate func(*swf.HistoryEvent) bool) {
+	ch := tl.getHistoryInterest(workflowId)
 	timer := time.After(waitFor)
 	for {
 		select {
 		case h := <-ch:
 			if predicate(h) {
-				tl.testAdapter.Logf("TestListener: await event for workflow=%s received-event=%s predicate=true", workflowID, *h.EventType)
+				tl.testAdapter.Logf("TestListener: await event for workflow=%s received-event=%s predicate=true", workflowId, *h.EventType)
 				return
 			} else {
-				tl.testAdapter.Logf("TestListener: await event for workflow=%s received-event=%s predicate=false", workflowID, *h.EventType)
+				tl.testAdapter.Logf("TestListener: await event for workflow=%s received-event=%s predicate=false", workflowId, *h.EventType)
 			}
 		case <-timer:
-			panic(fmt.Sprintf("TestListener: timed out waiting for workflow=%s event", workflowID))
-			tl.testAdapter.Fatalf("TestListener: timed out waiting for workflow=%s event", workflowID)
+			panic(fmt.Sprintf("TestListener: timed out waiting for workflow=%s event", workflowId))
+			tl.testAdapter.Fatalf("TestListener: timed out waiting for workflow=%s event", workflowId)
 			tl.testAdapter.FailNow()
 		}
 	}
 }
 
-func (tl *TestListener) AwaitEvent(workflowID string, predicate func(swf.HistoryEvent) bool) {
-	tl.AwaitEventFor(workflowID, tl.DefaultWait, predicate)
+func (tl *TestListener) AwaitEvent(workflowId string, predicate func(*swf.HistoryEvent) bool) {
+	tl.AwaitEventFor(workflowId, tl.DefaultWait, predicate)
 }
 
-func (tl *TestListener) AwaitDecisionFor(workflowID string, waitFor time.Duration, predicate func(swf.Decision) bool) {
-	ch := tl.RegisterDecisionInterest(workflowID)
+func (tl *TestListener) AwaitDecisionFor(workflowId string, waitFor time.Duration, predicate func(*swf.Decision) bool) {
+	ch := tl.getDecisionInterest(workflowId)
 	timer := time.After(waitFor)
 	for {
 		select {
 		case h := <-ch:
 			if predicate(h) {
-				tl.testAdapter.Logf("TestListener: await decision for workflow=%s received-decision=%s predicate=true", workflowID, *h.DecisionType)
+				tl.testAdapter.Logf("TestListener: await decision for workflow=%s received-decision=%s predicate=true", workflowId, *h.DecisionType)
 				return
 			} else {
-				tl.testAdapter.Logf("TestListener: await decision for workflow=%s received-decision=%s predicate=false", workflowID, *h.DecisionType)
+				tl.testAdapter.Logf("TestListener: await decision for workflow=%s received-decision=%s predicate=false", workflowId, *h.DecisionType)
 			}
 		case <-timer:
-			panic(fmt.Sprintf("TestListener: timed out waiting for workflow=%s decision", workflowID))
-			tl.testAdapter.Fatalf("TestListener: timed out waiting for workflow=%s decision", workflowID)
+			panic(fmt.Sprintf("TestListener: timed out waiting for workflow=%s decision", workflowId))
+			tl.testAdapter.Fatalf("TestListener: timed out waiting for workflow=%s decision", workflowId)
 			tl.testAdapter.FailNow()
 		}
 	}
 }
 
-func (tl *TestListener) AwaitDecision(workflowID string, predicate func(swf.Decision) bool) {
-	tl.AwaitDecisionFor(workflowID, tl.DefaultWait, predicate)
+func (tl *TestListener) AwaitDecision(workflowId string, predicate func(*swf.Decision) bool) {
+	tl.AwaitDecisionFor(workflowId, tl.DefaultWait, predicate)
+}
+
+func (tl *TestListener) AwaitDataFor(workflowId string, waitFor time.Duration, predicate func(*StateData) bool) {
+	ch := tl.getDataInterest(workflowId)
+	timer := time.After(waitFor)
+	for {
+		select {
+		case d := <-ch:
+			if predicate(d) {
+				tl.testAdapter.Logf("TestListener: await data for workflow=%s received-data=%+v predicate=true", workflowId, d)
+				return
+			} else {
+				tl.testAdapter.Logf("TestListener: await data for workflow=%s received-data=%+v predicate=false", workflowId, d)
+			}
+		case <-timer:
+			panic(fmt.Sprintf("TestListener: timed out waiting for workflow=%s data", workflowId))
+			tl.testAdapter.Fatalf("TestListener: timed out waiting for workflow=%s data", workflowId)
+			tl.testAdapter.FailNow()
+		}
+	}
+}
+
+func (tl *TestListener) AwaitData(workflowId string, predicate func(*StateData) bool) {
+	tl.AwaitDataFor(workflowId, tl.DefaultWait, predicate)
 }
 
 func (tl *TestListener) Start() {
@@ -193,39 +305,63 @@ func (tl *TestListener) forward() {
 				return
 			}
 
-			workflow := *do.DecisionTask.WorkflowExecution.WorkflowID
-			tl.testAdapter.Logf("TestListener: DecisionOutcome for workflow %s", workflow)
+			workflowId := *do.DecisionTask.WorkflowExecution.WorkflowId
+			tl.testAdapter.Logf("TestListener: DecisionOutcome for workflow %s", workflowId)
+
 			//send history events
-			if c, ok := tl.historyInterest[workflow]; ok {
-				tl.testAdapter.Logf("TestListener: yes historyInterest for workflow %s", workflow)
-				for i := len(do.DecisionTask.Events) - 1; i >= 0; i-- {
-					event := do.DecisionTask.Events[i]
-					if *event.EventID > *do.DecisionTask.PreviousStartedEventID {
-						tl.testAdapter.Logf("TestListener: yes historyInterest for workflow %s %s", workflow, *do.DecisionTask.Events[i].EventType)
-						c <- do.DecisionTask.Events[i]
+			historyChan := tl.getHistoryInterest(workflowId)
+			for i := len(do.DecisionTask.Events) - 1; i >= 0; i-- {
+				event := do.DecisionTask.Events[i]
+				if *event.EventId > *do.DecisionTask.PreviousStartedEventId {
+					select {
+					case historyChan <- do.DecisionTask.Events[i]:
+					default:
+						tl.testAdapter.Fatalf("historyChan full for %s", workflowId)
 					}
 				}
-			} else {
-				tl.testAdapter.Logf("TestListener: no historyInterest for workflow %s", workflow)
 			}
+
 			//send decisions
-			if c, ok := tl.decisionInterest[workflow]; ok {
-				for _, d := range do.Decisions {
-					tl.testAdapter.Logf("TestListener: yes decisionInterest for workflow %s %s", workflow, *d.DecisionType)
-					c <- d
+			decisionChan := tl.getDecisionInterest(workflowId)
+			for _, d := range do.Decisions {
+				select {
+				case decisionChan <- d:
+				default:
+					tl.testAdapter.Fatalf("decisionChan full for %s", workflowId)
 				}
-			} else {
-				tl.testAdapter.Logf("TestListener: no decisionInterest for workflow %s", workflow)
 			}
+
 			//send states
-			if c, ok := tl.stateInterest[workflow]; ok {
-				tl.testAdapter.Logf("TestListener: yes stateInterest for workflow %s %s", workflow, do.State)
-				c <- do.State
-			} else {
-				tl.testAdapter.Logf("TestListener: no stateInterest for workflow %s", workflow)
+			stateChan := tl.getStateInterest(workflowId)
+			select {
+			case stateChan <- do.State.StateName:
+			default:
+				tl.testAdapter.Fatalf("stateChan full for %s", workflowId)
 			}
+
+			//send data
+			dataChan := tl.getDataInterest(workflowId)
+			stateData := &StateData{
+				State: do.State.StateName,
+				Data:  tl.deserialize(do.State.StateData),
+			}
+			select {
+			case dataChan <- stateData:
+			default:
+				tl.testAdapter.Fatalf("dataChan full for %s", workflowId)
+			}
+
 		case <-time.After(1 * time.Second):
 			tl.testAdapter.Logf("TestListener: warn, no DecisionOutcomes after 1 second")
 		}
 	}
+}
+
+func (tl *TestListener) deserialize(serialized string) interface{} {
+	data := reflect.New(reflect.TypeOf(tl.dataType)).Interface()
+	err := tl.serializer.Deserialize(serialized, data)
+	if err != nil {
+		panic("cant deserialize data")
+	}
+	return data
 }

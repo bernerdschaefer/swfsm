@@ -2,12 +2,10 @@ package fsm
 
 import (
 	"fmt"
-	"log"
 	"reflect"
-	"strconv"
 
-	"github.com/awslabs/aws-sdk-go/aws"
-	"github.com/awslabs/aws-sdk-go/gen/swf"
+	"github.com/aws/aws-sdk-go/service/swf"
+	. "github.com/sclasen/swfsm/log"
 	. "github.com/sclasen/swfsm/sugar"
 )
 
@@ -29,7 +27,7 @@ func NewComposedDecider(deciders ...Decider) Decider {
 }
 
 //Decide is the the Decider func for a ComposedDecider
-func (c *ComposedDecider) Decide(ctx *FSMContext, h swf.HistoryEvent, data interface{}) Outcome {
+func (c *ComposedDecider) Decide(ctx *FSMContext, h *swf.HistoryEvent, data interface{}) Outcome {
 	state := ctx.State
 	decisions := ctx.EmptyDecisions()
 	for _, d := range c.deciders {
@@ -56,27 +54,27 @@ func (c *ComposedDecider) Decide(ctx *FSMContext, h swf.HistoryEvent, data inter
 }
 
 func logf(ctx *FSMContext, format string, data ...interface{}) {
-	format = fmt.Sprintf("workflow=%s workflow-id=%s state=%s ", LS(ctx.WorkflowType.Name), LS(ctx.WorkflowID), ctx.State) + format
-	log.Printf(format, data...)
+	format = fmt.Sprintf("workflow=%s workflow-id=%s state=%s ", LS(ctx.WorkflowType.Name), LS(ctx.WorkflowId), ctx.State) + format
+	Log.Printf(format, data...)
 }
 
 //DefaultDecider is a 'catch-all' decider that simply logs the unhandled decision.
 //You should place this or one like it as the last decider in your top level ComposableDecider.
 func DefaultDecider() Decider {
-	return func(ctx *FSMContext, h swf.HistoryEvent, data interface{}) Outcome {
-		log.Printf("at=unhandled-event event=%s state=%s default=stay decisions=0", LS(h.EventType), ctx.State)
+	return func(ctx *FSMContext, h *swf.HistoryEvent, data interface{}) Outcome {
+		Log.Printf("at=unhandled-event event=%s state=%s default=stay decisions=0", LS(h.EventType), ctx.State)
 		return ctx.Stay(data, ctx.EmptyDecisions())
 	}
 }
 
 //DecisionFunc is a building block for composable deciders that returns a decision.
-type DecisionFunc func(ctx *FSMContext, h swf.HistoryEvent, data interface{}) swf.Decision
+type DecisionFunc func(ctx *FSMContext, h *swf.HistoryEvent, data interface{}) *swf.Decision
 
 //MultiDecisionFunc is a building block for composable deciders that returns a [] of decision.
-type MultiDecisionFunc func(ctx *FSMContext, h swf.HistoryEvent, data interface{}) []swf.Decision
+type MultiDecisionFunc func(ctx *FSMContext, h *swf.HistoryEvent, data interface{}) []*swf.Decision
 
 //StateFunc is a building block for composable deciders mutates the FSM stateData.
-type StateFunc func(ctx *FSMContext, h swf.HistoryEvent, data interface{})
+type StateFunc func(ctx *FSMContext, h *swf.HistoryEvent, data interface{})
 
 //PredicateFunc is a building block for composable deciders, a predicate based on the FSM stateData.
 type PredicateFunc func(data interface{}) bool
@@ -99,25 +97,25 @@ func (t *TypedFuncs) typeArg() string {
 
 //Decider builds a Decider from your typed Decider that verifies the right typing at construction time.
 func (t *TypedFuncs) Decider(decider interface{}) Decider {
-	typeCheck(decider, []string{"*fsm.FSMContext", "swf.HistoryEvent", t.typeArg()}, []string{"fsm.Outcome"})
+	typeCheck(decider, []string{"*fsm.FSMContext", "*swf.HistoryEvent", t.typeArg()}, []string{"fsm.Outcome"})
 	return marshalledFunc{reflect.ValueOf(decider)}.decider
 }
 
 //DecisionFunc builds a DecisionFunc from your typed DecisionFunc that verifies the right typing at construction time.
 func (t *TypedFuncs) DecisionFunc(decisionFunc interface{}) DecisionFunc {
-	typeCheck(decisionFunc, []string{"*fsm.FSMContext", "swf.HistoryEvent", t.typeArg()}, []string{"swf.Decision"})
+	typeCheck(decisionFunc, []string{"*fsm.FSMContext", "*swf.HistoryEvent", t.typeArg()}, []string{"*swf.Decision"})
 	return marshalledFunc{reflect.ValueOf(decisionFunc)}.decisionFunc
 }
 
 //MultiDecisionFunc builds a MultiDecisionFunc from your typed MultiDecisionFunc that verifies the right typing at construction time.
 func (t *TypedFuncs) MultiDecisionFunc(decisionFunc interface{}) MultiDecisionFunc {
-	typeCheck(decisionFunc, []string{"*fsm.FSMContext", "swf.HistoryEvent", t.typeArg()}, []string{"[]swf.Decision"})
+	typeCheck(decisionFunc, []string{"*fsm.FSMContext", "*swf.HistoryEvent", t.typeArg()}, []string{"[]*swf.Decision"})
 	return marshalledFunc{reflect.ValueOf(decisionFunc)}.multiDecisionFunc
 }
 
 //StateFunc builds a StateFunc from your typed StateFunc that verifies the right typing at construction time.
 func (t *TypedFuncs) StateFunc(stateFunc interface{}) StateFunc {
-	typeCheck(stateFunc, []string{"*fsm.FSMContext", "swf.HistoryEvent", t.typeArg()}, []string{})
+	typeCheck(stateFunc, []string{"*fsm.FSMContext", "*swf.HistoryEvent", t.typeArg()}, []string{})
 	return marshalledFunc{reflect.ValueOf(stateFunc)}.stateFunc
 }
 
@@ -131,22 +129,22 @@ type marshalledFunc struct {
 	v reflect.Value
 }
 
-func (m marshalledFunc) decider(f *FSMContext, h swf.HistoryEvent, data interface{}) Outcome {
+func (m marshalledFunc) decider(f *FSMContext, h *swf.HistoryEvent, data interface{}) Outcome {
 	ret := m.v.Call([]reflect.Value{reflect.ValueOf(f), reflect.ValueOf(h), reflect.ValueOf(data)})[0]
 	return ret.Interface().(Outcome)
 }
 
-func (m marshalledFunc) decisionFunc(f *FSMContext, h swf.HistoryEvent, data interface{}) swf.Decision {
+func (m marshalledFunc) decisionFunc(f *FSMContext, h *swf.HistoryEvent, data interface{}) *swf.Decision {
 	ret := m.v.Call([]reflect.Value{reflect.ValueOf(f), reflect.ValueOf(h), reflect.ValueOf(data)})[0]
-	return ret.Interface().(swf.Decision)
+	return ret.Interface().(*swf.Decision)
 }
 
-func (m marshalledFunc) multiDecisionFunc(f *FSMContext, h swf.HistoryEvent, data interface{}) []swf.Decision {
+func (m marshalledFunc) multiDecisionFunc(f *FSMContext, h *swf.HistoryEvent, data interface{}) []*swf.Decision {
 	ret := m.v.Call([]reflect.Value{reflect.ValueOf(f), reflect.ValueOf(h), reflect.ValueOf(data)})[0]
-	return ret.Interface().([]swf.Decision)
+	return ret.Interface().([]*swf.Decision)
 }
 
-func (m marshalledFunc) stateFunc(f *FSMContext, h swf.HistoryEvent, data interface{}) {
+func (m marshalledFunc) stateFunc(f *FSMContext, h *swf.HistoryEvent, data interface{}) {
 	m.v.Call([]reflect.Value{reflect.ValueOf(f), reflect.ValueOf(h), reflect.ValueOf(data)})
 }
 
@@ -200,7 +198,7 @@ func ToMulti(f DecisionFunc) MultiDecisionFunc {
 
 // OnStarted builds a composed decider that fires on swf.EventTypeWorkflowExecutionStarted.
 func OnStarted(deciders ...Decider) Decider {
-	return func(ctx *FSMContext, h swf.HistoryEvent, data interface{}) Outcome {
+	return func(ctx *FSMContext, h *swf.HistoryEvent, data interface{}) Outcome {
 		switch *h.EventType {
 		case swf.EventTypeWorkflowExecutionStarted:
 			logf(ctx, "at=on-started")
@@ -210,9 +208,20 @@ func OnStarted(deciders ...Decider) Decider {
 	}
 }
 
+func OnContinueFailed(deciders ...Decider) Decider {
+	return func(ctx *FSMContext, h *swf.HistoryEvent, data interface{}) Outcome {
+		switch *h.EventType {
+		case swf.EventTypeContinueAsNewWorkflowExecutionFailed:
+			logf(ctx, "at=on-continuefailed")
+			return NewComposedDecider(deciders...)(ctx, h, data)
+		}
+		return ctx.Pass()
+	}
+}
+
 // OnChildStarted builds a composed decider that fires on swf.EventTypeChildWorkflowExecutionStarted.
 func OnChildStarted(deciders ...Decider) Decider {
-	return func(ctx *FSMContext, h swf.HistoryEvent, data interface{}) Outcome {
+	return func(ctx *FSMContext, h *swf.HistoryEvent, data interface{}) Outcome {
 		switch *h.EventType {
 		case swf.EventTypeChildWorkflowExecutionStarted:
 			logf(ctx, "at=on-child-started")
@@ -224,7 +233,7 @@ func OnChildStarted(deciders ...Decider) Decider {
 
 // OnData builds a composed decider that fires on when the PredicateFunc is satisfied.
 func OnData(predicate PredicateFunc, deciders ...Decider) Decider {
-	return func(ctx *FSMContext, h swf.HistoryEvent, data interface{}) Outcome {
+	return func(ctx *FSMContext, h *swf.HistoryEvent, data interface{}) Outcome {
 		if predicate(data) {
 			logf(ctx, "at=on-data")
 			return NewComposedDecider(deciders...)(ctx, h, data)
@@ -233,9 +242,18 @@ func OnData(predicate PredicateFunc, deciders ...Decider) Decider {
 	}
 }
 
-// OnSignalsReceived builds a composed decider that fires on when one of the matching signal is recieved.
+// OnDataUnless builds a composed decider that fires on when the PredicateFunc is NOT satisfied.
+func OnDataUnless(predicate PredicateFunc, deciders ...Decider) Decider {
+	unlessPredicate := func(data interface{}) bool {
+		return !predicate(data)
+	}
+
+	return OnData(unlessPredicate, deciders...)
+}
+
+// OnSignalsReceived builds a composed decider that fires on when one of the matching signal is received.
 func OnSignalsReceived(signalNames []string, deciders ...Decider) Decider {
-	return func(ctx *FSMContext, h swf.HistoryEvent, data interface{}) Outcome {
+	return func(ctx *FSMContext, h *swf.HistoryEvent, data interface{}) Outcome {
 		switch *h.EventType {
 		case swf.EventTypeWorkflowExecutionSignaled:
 			for _, signalName := range signalNames {
@@ -249,14 +267,14 @@ func OnSignalsReceived(signalNames []string, deciders ...Decider) Decider {
 	}
 }
 
-// OnSignalReceived builds a composed decider that fires on when a matching signal is recieved.
+// OnSignalReceived builds a composed decider that fires on when a matching signal is received.
 func OnSignalReceived(signalName string, deciders ...Decider) Decider {
 	return OnSignalsReceived([]string{signalName}, deciders...)
 }
 
-// OnSignalSent builds a composed decider that fires on when a matching signal is recieved.
+// OnSignalSent builds a composed decider that fires on when a matching signal is received.
 func OnSignalSent(signalName string, deciders ...Decider) Decider {
-	return func(ctx *FSMContext, h swf.HistoryEvent, data interface{}) Outcome {
+	return func(ctx *FSMContext, h *swf.HistoryEvent, data interface{}) Outcome {
 		switch *h.EventType {
 		case swf.EventTypeExternalWorkflowExecutionSignaled:
 			// if we find a good signal info with matching signal, we have matched workflowId and signalId so fire deciders.
@@ -271,11 +289,11 @@ func OnSignalSent(signalName string, deciders ...Decider) Decider {
 }
 
 // OnTimerFired builds a composed decider that fires on when a matching timer is fired.
-func OnTimerFired(timerID string, deciders ...Decider) Decider {
-	return func(ctx *FSMContext, h swf.HistoryEvent, data interface{}) Outcome {
+func OnTimerFired(timerId string, deciders ...Decider) Decider {
+	return func(ctx *FSMContext, h *swf.HistoryEvent, data interface{}) Outcome {
 		switch *h.EventType {
 		case swf.EventTypeTimerFired:
-			if *h.TimerFiredEventAttributes.TimerID == timerID {
+			if *h.TimerFiredEventAttributes.TimerId == timerId {
 				logf(ctx, "at=on-timer-fired")
 				return NewComposedDecider(deciders...)(ctx, h, data)
 			}
@@ -286,7 +304,7 @@ func OnTimerFired(timerID string, deciders ...Decider) Decider {
 
 // OnSignalFailed builds a composed decider that fires on when a matching signal fails.
 func OnSignalFailed(signalName string, deciders ...Decider) Decider {
-	return func(ctx *FSMContext, h swf.HistoryEvent, data interface{}) Outcome {
+	return func(ctx *FSMContext, h *swf.HistoryEvent, data interface{}) Outcome {
 		switch *h.EventType {
 		case swf.EventTypeSignalExternalWorkflowExecutionFailed:
 			// if we find a good signal info with matching signal, we have matched workflowId and signalId so fire deciders.
@@ -301,7 +319,7 @@ func OnSignalFailed(signalName string, deciders ...Decider) Decider {
 }
 
 func OnActivityEvents(activityName string, eventTypes []string, deciders ...Decider) Decider {
-	return func(ctx *FSMContext, h swf.HistoryEvent, data interface{}) Outcome {
+	return func(ctx *FSMContext, h *swf.HistoryEvent, data interface{}) Outcome {
 		for _, eventType := range eventTypes {
 			info := ctx.ActivityInfo(h)
 			if info != nil && *h.EventType == eventType && *ctx.ActivityInfo(h).Name == activityName {
@@ -331,6 +349,7 @@ func OnActivityCompleted(activityName string, deciders ...Decider) Decider {
 func OnActivityFailed(activityName string, deciders ...Decider) Decider {
 	return OnActivityEvents(activityName, []string{
 		swf.EventTypeActivityTaskFailed,
+		swf.EventTypeScheduleActivityTaskFailed,
 	}, deciders...)
 }
 
@@ -354,12 +373,278 @@ func OnActivityFailedTimedOutCanceled(activityName string, deciders ...Decider) 
 		swf.EventTypeActivityTaskFailed,
 		swf.EventTypeActivityTaskTimedOut,
 		swf.EventTypeActivityTaskCanceled,
+		swf.EventTypeScheduleActivityTaskFailed,
 	}, deciders...)
+}
+
+func OnActivityHeartbeatTimeout(activityName string, deciders ...Decider) Decider {
+	return OnActivityTimedOut(activityName,
+		func(ctx *FSMContext, h *swf.HistoryEvent, data interface{}) Outcome {
+			if *h.ActivityTaskTimedOutEventAttributes.TimeoutType == swf.ActivityTaskTimeoutTypeHeartbeat {
+				logf(ctx, "at=on-activity-heartbeat-timeout")
+				return NewComposedDecider(deciders...)(ctx, h, data)
+			}
+			return ctx.Pass()
+		},
+	)
+}
+
+func OnActivityScheduleToStartTimeout(activityName string, deciders ...Decider) Decider {
+	return OnActivityTimedOut(activityName,
+		func(ctx *FSMContext, h *swf.HistoryEvent, data interface{}) Outcome {
+			if *h.ActivityTaskTimedOutEventAttributes.TimeoutType == swf.ActivityTaskTimeoutTypeScheduleToStart {
+				logf(ctx, "at=on-activity-schedule-to-start-timeout")
+				return NewComposedDecider(deciders...)(ctx, h, data)
+			}
+			return ctx.Pass()
+		},
+	)
+}
+
+func OnActivityScheduleToCloseTimeout(activityName string, deciders ...Decider) Decider {
+	return OnActivityTimedOut(activityName,
+		func(ctx *FSMContext, h *swf.HistoryEvent, data interface{}) Outcome {
+			if *h.ActivityTaskTimedOutEventAttributes.TimeoutType == swf.ActivityTaskTimeoutTypeScheduleToClose {
+				logf(ctx, "at=on-activity-schedule-to-close-timeout")
+				return NewComposedDecider(deciders...)(ctx, h, data)
+			}
+			return ctx.Pass()
+		},
+	)
+}
+
+func OnActivityStartToCloseTimeout(activityName string, deciders ...Decider) Decider {
+	return OnActivityTimedOut(activityName,
+		func(ctx *FSMContext, h *swf.HistoryEvent, data interface{}) Outcome {
+			if *h.ActivityTaskTimedOutEventAttributes.TimeoutType == swf.ActivityTaskTimeoutTypeStartToClose {
+				logf(ctx, "at=on-activity-start-to-close-timeout")
+				return NewComposedDecider(deciders...)(ctx, h, data)
+			}
+			return ctx.Pass()
+		},
+	)
+}
+
+func OnWorkflowCancelRequested(deciders ...Decider) Decider {
+	return func(ctx *FSMContext, h *swf.HistoryEvent, data interface{}) Outcome {
+		switch *h.EventType {
+		case swf.EventTypeWorkflowExecutionCancelRequested:
+			logf(ctx, "at=on-wokrflow-execution-cancel-requested")
+			return NewComposedDecider(deciders...)(ctx, h, data)
+		}
+		return ctx.Pass()
+	}
+}
+
+func OnExternalWorkflowExecutionCancelRequested(deciders ...Decider) Decider {
+	return func(ctx *FSMContext, h *swf.HistoryEvent, data interface{}) Outcome {
+		switch *h.EventType {
+		case swf.EventTypeExternalWorkflowExecutionCancelRequested:
+			logf(ctx, "at=on-external-workflow-execution-cancel-requested")
+			return NewComposedDecider(deciders...)(ctx, h, data)
+		}
+		return ctx.Pass()
+	}
+}
+
+func OnRequestCancelExternalWorkflowExecutionFailed(deciders ...Decider) Decider {
+	return func(ctx *FSMContext, h *swf.HistoryEvent, data interface{}) Outcome {
+		switch *h.EventType {
+		case swf.EventTypeRequestCancelExternalWorkflowExecutionFailed:
+			logf(ctx, "at=on-request-cancel-external-workflow-execution-failed")
+			return NewComposedDecider(deciders...)(ctx, h, data)
+		}
+		return ctx.Pass()
+	}
+}
+
+// OnChildStarted builds a composed decider that fires on EventTypeStartChildWorkflowExecutionFailed.
+func OnChildStartFailed(deciders ...Decider) Decider {
+	return onChildEvent("on-child-failed", swf.EventTypeStartChildWorkflowExecutionFailed, deciders...)
+}
+
+// OnChildCompleted builds a composed decider that fires on EventTypeChildWorkflowExecutionCompleted.
+func OnChildCompleted(deciders ...Decider) Decider {
+	return onChildEvent("on-child-completed", swf.EventTypeChildWorkflowExecutionCompleted, deciders...)
+}
+
+func onChildEvent(at string, event string, deciders ...Decider) Decider {
+	return func(ctx *FSMContext, h *swf.HistoryEvent, data interface{}) Outcome {
+		switch *h.EventType {
+		case event:
+			logf(ctx, "at=%s", at)
+			return NewComposedDecider(deciders...)(ctx, h, data)
+		}
+		return ctx.Pass()
+	}
+}
+
+// OnStartTimerFailed builds a composed decider that fires on EventTypeStartTimerFailed.
+func OnStartTimerFailed(timer string, deciders ...Decider) Decider {
+	return func(ctx *FSMContext, h *swf.HistoryEvent, data interface{}) Outcome {
+		switch *h.EventType {
+		case swf.EventTypeStartTimerFailed:
+			if *h.StartTimerFailedEventAttributes.TimerId == timer {
+				logf(ctx, "at=on-start-timer-failed timer=%q cause=%q", *h.StartTimerFailedEventAttributes.TimerId, *h.StartTimerFailedEventAttributes.Cause)
+				return NewComposedDecider(deciders...)(ctx, h, data)
+			}
+		}
+		return ctx.Pass()
+	}
+}
+
+// OnTimerCanceled builds a composed decider that fires on EventTypeTimerCanceled.
+func OnTimerCanceled(timer string, deciders ...Decider) Decider {
+	return func(ctx *FSMContext, h *swf.HistoryEvent, data interface{}) Outcome {
+		switch *h.EventType {
+		case swf.EventTypeTimerCanceled:
+			if *h.TimerCanceledEventAttributes.TimerId == timer {
+				logf(ctx, "at=on-timer-canceled timer=%q", *h.TimerCanceledEventAttributes.TimerId)
+				return NewComposedDecider(deciders...)(ctx, h, data)
+			}
+		}
+		return ctx.Pass()
+	}
+}
+
+func OnExternalCancellationResponse(exitDecider Decider) Decider {
+	return func(ctx *FSMContext, h *swf.HistoryEvent, data interface{}) Outcome {
+		switch *h.EventType {
+		case swf.EventTypeRequestCancelExternalWorkflowExecutionFailed:
+			failure := h.RequestCancelExternalWorkflowExecutionFailedEventAttributes
+			if *failure.Cause == swf.RequestCancelExternalWorkflowExecutionFailedCauseUnknownExternalWorkflowExecution {
+				logf(ctx, "at=request-cancel-related-workflows-unknown-workflow-execution workflow-id=%q", *failure.WorkflowId)
+				break // ignore the error on this workflow. break out to make sure no others are in flight
+			} else if ctx.Correlator().AttemptsForCancellation(&CancellationInfo{WorkflowId: *failure.WorkflowId}) >= 5 {
+				logf(ctx, "at=request-cancel-related-workflows-max-retries workflow-id=%q", *failure.WorkflowId)
+				break // reached max attempts on this workflow. break out to make sure no others are in flight
+			} else {
+				// retry
+				logf(ctx, "at=request-cancel-related-workflows-retry workflow-id=%q", *failure.WorkflowId)
+				return ctx.Stay(data, []*swf.Decision{
+					&swf.Decision{
+						DecisionType: S(swf.DecisionTypeRequestCancelExternalWorkflowExecution),
+						RequestCancelExternalWorkflowExecutionDecisionAttributes: &swf.RequestCancelExternalWorkflowExecutionDecisionAttributes{
+							WorkflowId: failure.WorkflowId,
+						},
+					},
+				})
+			}
+		case swf.EventTypeExternalWorkflowExecutionCancelRequested:
+			break // this workflow is ok. break out to make sure no others are in flight
+		default:
+			return ctx.Pass()
+		}
+
+		if len(ctx.Correlator().Cancellations) <= 1 {
+			return exitDecider(ctx, h, data)
+		}
+
+		return ctx.Pass()
+	}
+}
+
+// OnUnknownWorkflowSignaled builds a composed decider that fires if the signal specified by
+// signalName is signaled on an unknown Workflow ID.
+func OnUnknownWorkflowSignaled(signalName string, deciders ...Decider) Decider {
+	return func(ctx *FSMContext, h *swf.HistoryEvent, data interface{}) Outcome {
+		// event type: failed to signal external workflow
+		if *h.EventType == swf.EventTypeSignalExternalWorkflowExecutionFailed {
+			failure := h.SignalExternalWorkflowExecutionFailedEventAttributes
+
+			// failure cause: external workflow does not exist
+			if *failure.Cause == swf.SignalExternalWorkflowExecutionFailedCauseUnknownExternalWorkflowExecution {
+				info := ctx.SignalInfo(h)
+				// signal name matches
+				if info != nil && info.SignalName == signalName {
+					// ignore the error on this workflow. break out to make sure no others are in flight
+					logf(ctx, "at=signal-external-workflow-unknown-workflow-execution workflow-id=%q", *failure.WorkflowId)
+					return NewComposedDecider(deciders...)(ctx, h, data)
+				}
+			}
+		}
+
+		return ctx.Pass()
+	}
+}
+
+// OnSignalFailedAndNotUnknown passes the event to OnSignalFailed only if the signal
+// specified by signalName matches and the signalling was targeting a known Workflow ID.
+func OnSignalFailedAndNotUnknown(signalName string, deciders ...Decider) Decider {
+	return func(ctx *FSMContext, h *swf.HistoryEvent, data interface{}) Outcome {
+		// event type: failed to signal external workflow
+		if *h.EventType == swf.EventTypeSignalExternalWorkflowExecutionFailed {
+			failure := h.SignalExternalWorkflowExecutionFailedEventAttributes
+
+			// failure cause: external workflow does not exist
+			if *failure.Cause == swf.SignalExternalWorkflowExecutionFailedCauseUnknownExternalWorkflowExecution {
+				info := ctx.SignalInfo(h)
+				// signal name matches
+				if info != nil && info.SignalName == signalName {
+					// ignore the error on this workflow. break out to make sure no others are in flight
+					logf(ctx, "at=signal-external-workflow-unknown-workflow-execution workflow-id=%q", *failure.WorkflowId)
+					return ctx.Pass()
+				}
+			}
+		}
+
+		return OnSignalFailed(signalName, deciders...)(ctx, h, data)
+	}
+}
+
+// OnChildStartedOrAlreadyRunning builds a composed decider that fires on
+// EventTypeChildWorkflowExecutionStarted OR EventTypeStartChildWorkflowExecutionFailed with Cause == "WORKFLOW_ALREADY_RUNNING".
+func OnChildStartedOrAlreadyRunning(deciders ...Decider) Decider {
+	return func(ctx *FSMContext, h *swf.HistoryEvent, data interface{}) Outcome {
+		if *h.EventType == swf.EventTypeChildWorkflowExecutionStarted ||
+			(*h.EventType == swf.EventTypeStartChildWorkflowExecutionFailed &&
+				*h.StartChildWorkflowExecutionFailedEventAttributes.Cause ==
+					swf.StartChildWorkflowExecutionFailedCauseWorkflowAlreadyRunning) {
+			logf(ctx, "at=child-start-or-already-running workflow-id=%q", *ctx.WorkflowExecution.WorkflowId)
+			return NewComposedDecider(deciders...)(ctx, h, data)
+		}
+		return ctx.Pass()
+	}
+}
+
+// OnChildStartFailedAndNotAlreadyRunning builds a composed decider that fires on
+// EventTypeStartChildWorkflowExecutionFailed and Cause != "WORKFLOW_ALREADY_RUNNING".
+func OnChildStartFailedAndNotAlreadyRunning(deciders ...Decider) Decider {
+	return func(ctx *FSMContext, h *swf.HistoryEvent, data interface{}) Outcome {
+		if *h.EventType == swf.EventTypeStartChildWorkflowExecutionFailed {
+			failure := h.StartChildWorkflowExecutionFailedEventAttributes
+
+			// failure cause: external workflow does not exist
+			if *failure.Cause == swf.StartChildWorkflowExecutionFailedCauseWorkflowAlreadyRunning {
+				return ctx.Pass()
+			}
+		}
+
+		logf(ctx, "at=child-start-failed-not-already-running workflow-id=%q", *ctx.WorkflowExecution.WorkflowId)
+		return OnChildStartFailed(deciders...)(ctx, h, data)
+	}
+}
+
+func OnChildStartFailedAlreadyRunning(deciders ...Decider) Decider {
+	return func(ctx *FSMContext, h *swf.HistoryEvent, data interface{}) Outcome {
+		// event type: failed to signal external workflow
+		if *h.EventType == swf.EventTypeStartChildWorkflowExecutionFailed {
+			failure := h.StartChildWorkflowExecutionFailedEventAttributes
+
+			// failure cause: external workflow does not exist
+			if *failure.Cause == swf.StartChildWorkflowExecutionFailedCauseWorkflowAlreadyRunning {
+				logf(ctx, "at=child-start-failed-already-running workflow-id=%q", *failure.WorkflowId)
+				return NewComposedDecider(deciders...)(ctx, h, data)
+			}
+		}
+
+		return ctx.Pass()
+	}
 }
 
 // AddDecision adds a single decision to a ContinueDecider outcome
 func AddDecision(decisionFn DecisionFunc) Decider {
-	return func(ctx *FSMContext, h swf.HistoryEvent, data interface{}) Outcome {
+	return func(ctx *FSMContext, h *swf.HistoryEvent, data interface{}) Outcome {
 		decisions := ctx.EmptyDecisions()
 		d := decisionFn(ctx, h, data)
 		logf(ctx, "at=decide")
@@ -370,7 +655,7 @@ func AddDecision(decisionFn DecisionFunc) Decider {
 
 // AddDecisions adds decisions to a ContinueDecider outcome
 func AddDecisions(signalFn MultiDecisionFunc) Decider {
-	return func(ctx *FSMContext, h swf.HistoryEvent, data interface{}) Outcome {
+	return func(ctx *FSMContext, h *swf.HistoryEvent, data interface{}) Outcome {
 		decisions := ctx.EmptyDecisions()
 		ds := signalFn(ctx, h, data)
 		logf(ctx, "at=decide-many")
@@ -381,7 +666,7 @@ func AddDecisions(signalFn MultiDecisionFunc) Decider {
 
 // UpdateState allows you to modicy the state data without generating decisions.
 func UpdateState(updateFunc StateFunc) Decider {
-	return func(ctx *FSMContext, h swf.HistoryEvent, data interface{}) Outcome {
+	return func(ctx *FSMContext, h *swf.HistoryEvent, data interface{}) Outcome {
 		logf(ctx, "at=update-state")
 		updateFunc(ctx, h, data)
 		return ctx.ContinueDecider(data, ctx.EmptyDecisions())
@@ -390,7 +675,7 @@ func UpdateState(updateFunc StateFunc) Decider {
 
 // Transition transitions the FSM to a new state, and terminates the decdier.
 func Transition(toState string) Decider {
-	return func(ctx *FSMContext, h swf.HistoryEvent, data interface{}) Outcome {
+	return func(ctx *FSMContext, h *swf.HistoryEvent, data interface{}) Outcome {
 		logf(ctx, "at=transition")
 		return ctx.Goto(toState, data, ctx.EmptyDecisions())
 	}
@@ -398,102 +683,32 @@ func Transition(toState string) Decider {
 
 // CompleteWorkflow completes the workflow
 func CompleteWorkflow() Decider {
-	return func(ctx *FSMContext, h swf.HistoryEvent, data interface{}) Outcome {
-		log.Printf("at=complete-workflow workflowID=%s", LS(ctx.WorkflowID))
+	return func(ctx *FSMContext, h *swf.HistoryEvent, data interface{}) Outcome {
+		Log.Printf("at=complete-workflow workflowId=%s", LS(ctx.WorkflowId))
 		return ctx.CompleteWorkflow(data)
+	}
+}
+
+// CancelWorkflow cancels the workflow
+func CancelWorkflow(details *string) Decider {
+	return func(ctx *FSMContext, h *swf.HistoryEvent, data interface{}) Outcome {
+		Log.Printf("at=cancel-workflow workflowId=%s", LS(ctx.WorkflowId))
+		return ctx.CancelWorkflow(data, details)
+	}
+}
+
+// FailWorkflow fails the workflow
+func FailWorkflow(details *string) Decider {
+	return func(ctx *FSMContext, h *swf.HistoryEvent, data interface{}) Outcome {
+		Log.Printf("at=fail-workflow workflowId=%s", LS(ctx.WorkflowId))
+		return ctx.FailWorkflow(data, details)
 	}
 }
 
 // Stay keeps the fsm in the same state, and terminates the decider.
 func Stay() Decider {
-	return func(ctx *FSMContext, h swf.HistoryEvent, data interface{}) Outcome {
+	return func(ctx *FSMContext, h *swf.HistoryEvent, data interface{}) Outcome {
 		logf(ctx, "at=stay")
 		return ctx.Stay(data, ctx.EmptyDecisions())
 	}
-}
-
-//ManagedContinuations is a composable decider that will handle most of the mechanics of autmoatically continuing workflows.
-//todo, does it ever happen that we would have a decision task that previous deciders would have created a decision that
-//breaks continuation? i.e. you get decision task that has a history containing 2 signals, etc.
-//lets assume not till we find otherwise. If we are wrong, managedcontinuations probably cant happen in userspace.
-// If there are no activities present in the tracker, it will continueAsNew the workflow in response
-// to a FSM.ContinueWorkflow timer or signal. If there are activities present in the tracker, it will
-// set a new FSM.ContinueWorkflow timer, that fires in timerRetrySeconds.
-// It will also signal the workflow to continue when the workflow history grows beyond the
-// configured historySize.
-// this should be last in your decider stack, as it will signal in response to *any* event that
-// has an id > historySize
-func ManagedContinuations(historySize int, timerRetrySeconds int) Decider {
-	handleContinuationTimer := func(ctx *FSMContext, h swf.HistoryEvent, data interface{}) Outcome {
-		if *h.EventType == swf.EventTypeTimerFired && *h.TimerFiredEventAttributes.TimerID == ContinueTimer {
-			if len(ctx.ActivitiesInfo()) == 0 {
-				decisions := append(ctx.EmptyDecisions(), ctx.ContinueWorkflowDecision(ctx.State, data))
-				return ctx.Stay(data, decisions)
-			}
-			d := swf.Decision{
-				DecisionType: aws.String(swf.DecisionTypeStartTimer),
-				StartTimerDecisionAttributes: &swf.StartTimerDecisionAttributes{
-					StartToFireTimeout: aws.String(strconv.Itoa(timerRetrySeconds)),
-					TimerID:            aws.String(ContinueTimer),
-				},
-			}
-			decisions := append(ctx.EmptyDecisions(), d)
-			return ctx.Stay(data, decisions)
-
-		}
-		return ctx.Pass()
-	}
-
-	handleContinuationSignal := func(ctx *FSMContext, h swf.HistoryEvent, data interface{}) Outcome {
-		if *h.EventType == swf.EventTypeWorkflowExecutionSignaled && *h.WorkflowExecutionSignaledEventAttributes.SignalName == ContinueSignal {
-
-			if len(ctx.ActivitiesInfo()) == 0 {
-				decisions := append(ctx.EmptyDecisions(), ctx.ContinueWorkflowDecision(ctx.State, data))
-				return ctx.Stay(data, decisions)
-			}
-
-			d := swf.Decision{
-				DecisionType: aws.String(swf.DecisionTypeStartTimer),
-				StartTimerDecisionAttributes: &swf.StartTimerDecisionAttributes{
-					StartToFireTimeout: aws.String(strconv.Itoa(timerRetrySeconds)),
-					TimerID:            aws.String(ContinueTimer),
-				},
-			}
-			decisions := append(ctx.EmptyDecisions(), d)
-			return ctx.Stay(data, decisions)
-
-		}
-		return ctx.Pass()
-	}
-
-	signalContinuationWhenHistoryLarge := func(ctx *FSMContext, h swf.HistoryEvent, data interface{}) Outcome {
-		if *h.EventID > int64(historySize) {
-			d := swf.Decision{
-				DecisionType: aws.String(swf.DecisionTypeSignalExternalWorkflowExecution),
-				SignalExternalWorkflowExecutionDecisionAttributes: &swf.SignalExternalWorkflowExecutionDecisionAttributes{
-					SignalName: aws.String(ContinueSignal),
-					WorkflowID: ctx.WorkflowID,
-					RunID:      ctx.RunID,
-				},
-			}
-			decisions := append(ctx.EmptyDecisions(), d)
-			return ctx.Stay(data, decisions)
-		}
-		return ctx.Pass()
-	}
-
-	return NewComposedDecider(
-		handleContinuationTimer,
-		handleContinuationSignal,
-		signalContinuationWhenHistoryLarge,
-	)
-
-}
-
-//RepairState is a decider that can be composed in which updates the current state data with the one recieved in the signal.
-func RepairState() Decider {
-	return OnSignalReceived(RepiarStateSignal, UpdateState(
-		func(ctx *FSMContext, h swf.HistoryEvent, data interface{}) {
-			ctx.EventData(h, data) //deserializes the signal input into data
-		}))
 }

@@ -1,42 +1,53 @@
-GO_PACKAGES := $(shell go list ./... | sed 's_github.com/sclasen/swfsm_._')
+GOVENDOR_DIR := ./vendor
+GO_PACKAGES := $(shell go list ./... | grep -v $(GOVENDOR_DIR) | sed 's_github.com/sclasen/swfsm_._')
+AWS_SERVICES_DIR := $(GOVENDOR_DIR)/github.com/aws/aws-sdk-go/service
+LIB_MOCKS_DIR := ./testing/mocks
+MOCK_NOTE := "AUTO-GENERATED MOCK. DO NOT EDIT.\nUSE make mocks TO REGENERATE."
 
-
-all: build
+all: ready test
 
 travis: tidy test
 
-install: godep
-	 godep go install ./...
+install:
+	 go install ./...
 
 forego:
 	go get github.com/ddollar/forego
 
-godep:
-	go get github.com/tools/godep
-
 test: install
-	godep go test ./...
+	go test ./...
 
 test-aws: install forego
-	forego run godep go test
+	forego run go test
 
 tidy:
-	go get code.google.com/p/go.tools/cmd/goimports
+	go get golang.org/x/tools/cmd/goimports
 	test -z "$$(goimports -l -d $(GO_PACKAGES) | tee /dev/stderr)"
 
 lint:
+	go get github.com/golang/lint/golint
 	test -z "$$(golint ./... | tee /dev/stderr)"
 	go vet ./...
 
-
 imports:
-	go get github.com/golang/lint/golint
-	goimports -w .
+	go get golang.org/x/tools/cmd/goimports
+	goimports -w -d $(GO_PACKAGES)
 
 fmt:
-	go fmt ./...
+	go fmt $(GO_PACKAGES)
 
 ready: fmt imports tidy
 
+# TODO: change back to https://github.com/vektra/mockery
+# after https://github.com/vektra/mockery/pull/36 is merged
+mockery:
+	go get -u github.com/ryanbrainard/mockery
+	go install github.com/ryanbrainard/mockery
 
+mocks: mockery
+	@rm -rf $(LIB_MOCKS_DIR)
+	@mkdir $(LIB_MOCKS_DIR)
 
+	@for AS in $$(ls $(AWS_SERVICES_DIR)); do \
+		mockery -dir $(AWS_SERVICES_DIR)/$${AS}/$${AS}iface -all -output $(LIB_MOCKS_DIR) -note $(MOCK_NOTE); \
+	done

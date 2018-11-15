@@ -1,9 +1,11 @@
 package activity
 
 import (
+	"errors"
+	"fmt"
 	"testing"
 
-	"github.com/awslabs/aws-sdk-go/gen/swf"
+	"github.com/aws/aws-sdk-go/service/swf"
 	. "github.com/sclasen/swfsm/sugar"
 )
 
@@ -11,22 +13,26 @@ func TestInterceptors(t *testing.T) {
 	calledFail := false
 	calledBefore := false
 	calledComplete := false
+	calledCanceled := false
 
-	task := &swf.ActivityTask{
+	task := &swf.PollForActivityTaskOutput{
 		ActivityType:      &swf.ActivityType{Name: S("test"), Version: S("test")},
-		ActivityID:        S("ID"),
-		WorkflowExecution: &swf.WorkflowExecution{WorkflowID: S("ID"), RunID: S("run")},
+		ActivityId:        S("ID"),
+		WorkflowExecution: &swf.WorkflowExecution{WorkflowId: S("ID"), RunId: S("run")},
 	}
 
 	interceptor := &FuncInterceptor{
-		BeforeTaskFn: func(decision *swf.ActivityTask) {
+		BeforeTaskFn: func(decision *swf.PollForActivityTaskOutput) {
 			calledBefore = true
 		},
-		AfterTaskCompleteFn: func(decision *swf.ActivityTask, result interface{}) {
+		AfterTaskCompleteFn: func(decision *swf.PollForActivityTaskOutput, result interface{}) {
 			calledComplete = true
 		},
-		AfterTaskFailedFn: func(decision *swf.ActivityTask, err error) {
+		AfterTaskFailedFn: func(decision *swf.PollForActivityTaskOutput, err error) {
 			calledFail = true
+		},
+		AfterTaskCanceledFn: func(decision *swf.PollForActivityTaskOutput, details string) {
+			calledCanceled = true
 		},
 	}
 
@@ -37,14 +43,14 @@ func TestInterceptors(t *testing.T) {
 
 	handler := &ActivityHandler{
 		Activity: "test",
-		HandlerFunc: func(activityTask *swf.ActivityTask, input interface{}) (interface{}, error) {
+		HandlerFunc: func(activityTask *swf.PollForActivityTaskOutput, input interface{}) (interface{}, error) {
 			return nil, nil
 		},
 	}
 
 	worker.AddHandler(handler)
 
-	worker.handleActivityTask(task)
+	worker.HandleActivityTask(task)
 
 	if !calledBefore {
 		t.Fatal("no before")
@@ -60,7 +66,7 @@ func TestInterceptors(t *testing.T) {
 	calledBefore = false
 	calledComplete = false
 
-	worker.handleActivityTask(task)
+	worker.HandleActivityTask(task)
 
 	if !calledBefore {
 		t.Fatal("no before")
@@ -70,4 +76,155 @@ func TestInterceptors(t *testing.T) {
 		t.Fatal("no after fail")
 	}
 
+}
+
+func TestFailedInterceptor(t *testing.T) {
+	var (
+		calledFail     = false
+		calledBefore   = false
+		calledComplete = false
+		calledCanceled = false
+		failMessage    string
+	)
+	task := &swf.PollForActivityTaskOutput{
+		ActivityType:      &swf.ActivityType{Name: S("test"), Version: S("test")},
+		ActivityId:        S("ID"),
+		WorkflowExecution: &swf.WorkflowExecution{WorkflowId: S("ID"), RunId: S("run")},
+	}
+	interceptor := &FuncInterceptor{
+		BeforeTaskFn: func(decision *swf.PollForActivityTaskOutput) {
+			calledBefore = true
+		},
+		AfterTaskCompleteFn: func(decision *swf.PollForActivityTaskOutput, result interface{}) {
+			calledComplete = true
+		},
+		AfterTaskFailedFn: func(decision *swf.PollForActivityTaskOutput, err error) {
+			calledFail = true
+			failMessage = err.Error()
+		},
+		AfterTaskCanceledFn: func(decision *swf.PollForActivityTaskOutput, details string) {
+			calledCanceled = true
+		},
+	}
+	worker := &ActivityWorker{
+		ActivityInterceptor: interceptor,
+		SWF:                 &MockSWF{},
+	}
+	handler := &ActivityHandler{
+		Activity: "test",
+		HandlerFunc: func(activityTask *swf.PollForActivityTaskOutput, input interface{}) (interface{}, error) {
+			return nil, errors.New("fail")
+		},
+	}
+
+	worker.AddHandler(handler)
+	worker.HandleActivityTask(task)
+	if !calledBefore {
+		t.Fatal("no before")
+	}
+	if !calledFail {
+		t.Fatal("no after fail")
+	}
+	if failMessage != "fail" {
+		t.Fatal("wong error message")
+	}
+
+}
+
+func TestCanceledInterceptor(t *testing.T) {
+	var (
+		calledFail     = false
+		calledBefore   = false
+		calledComplete = false
+		calledCanceled = false
+		details        string
+	)
+	task := &swf.PollForActivityTaskOutput{
+		ActivityType:      &swf.ActivityType{Name: S("test"), Version: S("test")},
+		ActivityId:        S("ID"),
+		WorkflowExecution: &swf.WorkflowExecution{WorkflowId: S("ID"), RunId: S("run")},
+	}
+	interceptor := &FuncInterceptor{
+		BeforeTaskFn: func(decision *swf.PollForActivityTaskOutput) {
+			calledBefore = true
+		},
+		AfterTaskCompleteFn: func(decision *swf.PollForActivityTaskOutput, result interface{}) {
+			calledComplete = true
+		},
+		AfterTaskFailedFn: func(decision *swf.PollForActivityTaskOutput, err error) {
+			calledFail = true
+		},
+		AfterTaskCanceledFn: func(decision *swf.PollForActivityTaskOutput, det string) {
+			calledCanceled = true
+			details = det
+		},
+	}
+	worker := &ActivityWorker{
+		ActivityInterceptor: interceptor,
+		SWF:                 &MockSWF{},
+	}
+	handler := &ActivityHandler{
+		Activity: "test",
+		HandlerFunc: func(activityTask *swf.PollForActivityTaskOutput, input interface{}) (interface{}, error) {
+			return nil, ActivityTaskCanceledError{details: "details"}
+		},
+	}
+
+	worker.AddHandler(handler)
+	worker.HandleActivityTask(task)
+	if !calledBefore {
+		t.Fatal("no before")
+	}
+	if !calledCanceled {
+		t.Fatal("no after canceled")
+	}
+	if details != "details" {
+		t.Fatalf("wong task canceled details. Got: %q", details)
+	}
+
+}
+
+func TestComposedInterceptor(t *testing.T) {
+	calledFirst := false
+	calledThird := false
+
+	c := NewComposedDecisionInterceptor(
+		&FuncInterceptor{
+			BeforeTaskFn: func(decision *swf.PollForActivityTaskOutput) {
+				calledFirst = true
+			},
+			AfterTaskFn: func(t *swf.PollForActivityTaskOutput, result interface{}, passedthrough error) (interface{}, error) {
+				return "overridden", passedthrough
+			},
+		},
+		nil, // shouldn't blow up on nil second,
+		&FuncInterceptor{
+			BeforeTaskFn: func(decision *swf.PollForActivityTaskOutput) {
+				calledThird = true
+			},
+		},
+	)
+
+	c.BeforeTask(nil)
+
+	if !calledFirst {
+		t.Fatalf("first not called")
+	}
+
+	if !calledThird {
+		t.Fatalf("third not called")
+	}
+
+	c.AfterTaskComplete(nil, nil) // shouldn't blow up on non-implemented methods
+
+	passthrough := fmt.Errorf("passthrough")
+	result, err := c.AfterTask(nil, nil, passthrough)
+
+	if result != "overridden" {
+		t.Fatalf("overridden value not returned")
+	}
+
+	if err != passthrough {
+		t.Fatalf("passed through value not returned")
+	}
 }

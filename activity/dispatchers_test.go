@@ -4,7 +4,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/awslabs/aws-sdk-go/gen/swf"
+	"github.com/aws/aws-sdk-go/service/swf"
 
 	"time"
 )
@@ -20,12 +20,32 @@ func TestBoundedGoroutineDispatcher(t *testing.T) {
 	testDispatcher(&BoundedGoroutineDispatcher{NumGoroutines: 8}, t)
 }
 
+func TestCountdownGoroutineDispatcher(t *testing.T) {
+	dispatcher := &CountdownGoroutineDispatcher{
+		Stop:    make(chan bool, 1),
+		StopAck: make(chan bool, 1),
+	}
+
+	go dispatcher.Start()
+
+	go func() {
+		testDispatcher(dispatcher, t)
+		dispatcher.Stop <- true
+	}()
+
+	select {
+	case <-dispatcher.StopAck:
+	case <-time.After(1 * time.Second):
+		t.Fatal("timed out waiting for tasks to countdown")
+	}
+}
+
 func testDispatcher(dispatcher ActivityTaskDispatcher, t *testing.T) {
-	task := &swf.ActivityTask{}
+	task := &swf.PollForActivityTaskOutput{}
 	tasksHandled := int32(0)
 	totalTasks := int32(1000)
 	done := make(chan struct{}, 1)
-	handler := func(d *swf.ActivityTask) {
+	handler := func(d *swf.PollForActivityTaskOutput) {
 		handled := atomic.AddInt32(&tasksHandled, 1)
 		if handled == totalTasks {
 			done <- struct{}{}

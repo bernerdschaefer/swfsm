@@ -5,8 +5,8 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/awslabs/aws-sdk-go/gen/kinesis"
-	"github.com/awslabs/aws-sdk-go/gen/swf"
+	"github.com/aws/aws-sdk-go/service/kinesis"
+	"github.com/aws/aws-sdk-go/service/swf"
 	. "github.com/sclasen/swfsm/sugar"
 )
 
@@ -26,12 +26,12 @@ func (c *MockClient) PutRecord(req *kinesis.PutRecordInput) (*kinesis.PutRecordO
 	c.seqNumber++
 	return &kinesis.PutRecordOutput{
 		SequenceNumber: S(strconv.Itoa(c.seqNumber)),
-		ShardID:        req.PartitionKey,
+		ShardId:        req.PartitionKey,
 	}, nil
 }
 
-func (c *MockClient) RespondDecisionTaskCompleted(req *swf.RespondDecisionTaskCompletedInput) (err error) {
-	return nil
+func (c *MockClient) RespondDecisionTaskCompleted(req *swf.RespondDecisionTaskCompletedInput) (*swf.RespondDecisionTaskCompletedOutput, error) {
+	return nil, nil
 }
 
 func TestKinesisReplication(t *testing.T) {
@@ -46,7 +46,7 @@ func TestKinesisReplication(t *testing.T) {
 	fsm.ReplicationHandler = rep.Handler
 	fsm.AddInitialState(&FSMState{
 		Name: "initial",
-		Decider: func(f *FSMContext, h swf.HistoryEvent, d interface{}) Outcome {
+		Decider: func(f *FSMContext, h *swf.HistoryEvent, d interface{}) Outcome {
 			if *h.EventType == swf.EventTypeWorkflowExecutionStarted {
 				return f.Goto("done", d, f.EmptyDecisions())
 			}
@@ -56,19 +56,19 @@ func TestKinesisReplication(t *testing.T) {
 	})
 	fsm.AddState(&FSMState{
 		Name: "done",
-		Decider: func(f *FSMContext, h swf.HistoryEvent, d interface{}) Outcome {
+		Decider: func(f *FSMContext, h *swf.HistoryEvent, d interface{}) Outcome {
 			go fsm.ShutdownManager.StopPollers()
 			return f.Stay(d, f.EmptyDecisions())
 		},
 	})
-	events := []swf.HistoryEvent{
-		swf.HistoryEvent{EventType: S("DecisionTaskStarted"), EventID: I(3)},
-		swf.HistoryEvent{EventType: S("DecisionTaskScheduled"), EventID: I(2)},
-		swf.HistoryEvent{
-			EventID:   I(1),
+	events := []*swf.HistoryEvent{
+		&swf.HistoryEvent{EventType: S("DecisionTaskStarted"), EventId: I(3)},
+		&swf.HistoryEvent{EventType: S("DecisionTaskScheduled"), EventId: I(2)},
+		&swf.HistoryEvent{
+			EventId:   I(1),
 			EventType: S("WorkflowExecutionStarted"),
 			WorkflowExecutionStartedEventAttributes: &swf.WorkflowExecutionStartedEventAttributes{
-				Input: S(fsm.Serialize(new(TestData))),
+				Input: StartFSMWorkflowInput(fsm, new(TestData)),
 			},
 		},
 	}
@@ -83,7 +83,7 @@ func TestKinesisReplication(t *testing.T) {
 	if *replication.StreamName != rep.KinesisStream {
 		t.Fatalf("expected Kinesis stream: %q, got %q", rep.KinesisStream, replication.StreamName)
 	}
-	var replicatedState ReplicationData
+	var replicatedState SerializedState
 	if err := fsm.Serializer.Deserialize(string(replication.Data), &replicatedState); err != nil {
 		t.Fatal(err)
 	}
